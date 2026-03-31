@@ -81,7 +81,7 @@ static constexpr int STA_Y      = 20;
 static constexpr int STA_LINE   = 18;
 static constexpr int TICKER_Y   = 220;
 static constexpr int TICKER_H   = 18;
-static constexpr int TICKER_REGION_Y = 200;   // top of ticker region (includes label)
+static constexpr int TICKER_REGION_Y = 210;   // top of ticker region (below station box at 208)
 static constexpr int TICKER_REGION_H = 40;    // full height to bottom of screen
 
 // Theme colours (computed once in setup)
@@ -143,16 +143,17 @@ static void drawFrame() {
     canvas.fillSprite(cBg);
 
     // ── Left panel: station list ──
-    canvas.fillRect(2, HDR_H + 2, LPANEL_W - 4, NUM_STATIONS * STA_LINE + 8, cPanel);
-    canvas.drawRect(2, HDR_H + 2, LPANEL_W - 4, NUM_STATIONS * STA_LINE + 8, cBorder);
-    canvas.fillRect(4, HDR_H, LPANEL_W - 8, 2, cAccent);
+    canvas.fillRect(2, HDR_H + 4, LPANEL_W - 4, NUM_STATIONS * STA_LINE + 8, cPanel);
+    canvas.drawRect(2, HDR_H + 4, LPANEL_W - 4, NUM_STATIONS * STA_LINE + 8, cBorder);
+    canvas.fillRect(4, HDR_H + 1, LPANEL_W - 8, 2, cAccent);
 
+    // Header labels — centered within their panel like Winamp2
     canvas.setTextColor(cBright, cBg);
-    canvas.drawString("STATIONS", 56, 2, 2);
-    canvas.drawString("INTERNET RADIO", RPANEL_X, 2, 2);
+    canvas.drawCenterString("STATIONS", 2 + (LPANEL_W - 4) / 2, 2, 2);
+    canvas.drawCenterString("INTERNET RADIO", RPANEL_X + RPANEL_W / 2, 2, 2);
 
     for (int i = 0; i < NUM_STATIONS; i++) {
-        int y = STA_Y + 4 + i * STA_LINE;
+        int y = STA_Y + 6 + i * STA_LINE;
         if (i == currentStation) {
             canvas.fillRect(4, y - 1, LPANEL_W - 8, STA_LINE - 2, cStationHl);
             canvas.setTextColor(TFT_GREEN, cStationHl);
@@ -163,27 +164,28 @@ static void drawFrame() {
         canvas.drawString(stationNames[i], 24, y, 2);
     }
 
-    canvas.fillRect(LPANEL_W, HDR_H + 2, 3, NUM_STATIONS * STA_LINE + 8, cBorder);
+    // Divider between panels
+    canvas.fillRect(LPANEL_W, HDR_H + 4, 3, NUM_STATIONS * STA_LINE + 8, cBorder);
 
     // ── Right panel: WiFi ──
-    int ry = HDR_H + 2;
+    int ry = HDR_H + 4;
     canvas.fillRect(RPANEL_X, ry, RPANEL_W, 56, cPanel);
     canvas.drawRect(RPANEL_X, ry, RPANEL_W, 56, cBorder);
-    canvas.fillRect(RPANEL_X, HDR_H, RPANEL_W, 2, cAccent);
+    canvas.fillRect(RPANEL_X + 2, HDR_H + 1, RPANEL_W - 4, 2, cAccent);
 
     canvas.setTextColor(cDim, cPanel);
-    canvas.drawString("WIFI", RPANEL_X + 4, ry + 4, 1);
+    canvas.drawString("WIFI", RPANEL_X + 6, ry + 4, 1);
     canvas.setTextColor(wifiConnected ? TFT_GREEN : TFT_RED, cPanel);
-    canvas.drawString(wifiConnected ? "CONNECTED" : "OFFLINE", RPANEL_X + 4, ry + 16, 1);
+    canvas.drawString(wifiConnected ? "CONNECTED" : "OFFLINE", RPANEL_X + 6, ry + 16, 1);
     canvas.setTextColor(cBright, cPanel);
     {
         char buf[16];
         snprintf(buf, sizeof(buf), "RSSI:%d", wifiRssi);
-        canvas.drawString(buf, RPANEL_X + 4, ry + 28, 1);
+        canvas.drawString(buf, RPANEL_X + 6, ry + 28, 1);
     }
     if (wifiConnected) {
         canvas.setTextColor(cDim, cPanel);
-        canvas.drawString(ipAddress, RPANEL_X + 4, ry + 40, 1);
+        canvas.drawString(ipAddress, RPANEL_X + 6, ry + 42, 1);
     }
 
     // ── Right panel: Visualiser ──
@@ -198,15 +200,15 @@ static void drawFrame() {
 
     // ── Right panel: Volume ──
     int vy = gy + 42;
-    canvas.fillRect(RPANEL_X, vy, RPANEL_W, 42, cPanel);
-    canvas.drawRect(RPANEL_X, vy, RPANEL_W, 42, cBorder);
+    canvas.fillRect(RPANEL_X, vy, RPANEL_W, 44, cPanel);
+    canvas.drawRect(RPANEL_X, vy, RPANEL_W, 44, cBorder);
 
     canvas.setTextColor(cDim, cPanel);
-    canvas.drawString("VOLUME", RPANEL_X + 32, vy + 2, 1);
+    canvas.drawCenterString("VOLUME", RPANEL_X + RPANEL_W / 2, vy + 3, 1);
 
     int barW = RPANEL_W - 16;
     int barX = RPANEL_X + 8;
-    int barY = vy + 14;
+    int barY = vy + 16;
     canvas.fillRoundRect(barX, barY, barW, 4, 2, cBarBg);
     int fillW = (vol * barW) / MAX_VOLUME;
     canvas.fillRoundRect(barX, barY, fillW, 4, 2, TFT_YELLOW);
@@ -214,42 +216,44 @@ static void drawFrame() {
     if (knobX < barX) knobX = barX;
     canvas.fillRoundRect(knobX, barY - 4, 8, 12, 3, cBright);
 
-    uint16_t muteCol = (vol == 0) ? TFT_RED : cBtnCol;
-    canvas.fillRoundRect(RPANEL_X + 4,  vy + 24, 33, 15, 3, cBtnCol);
-    canvas.fillRoundRect(RPANEL_X + 41, vy + 24, 33, 15, 3, muteCol);
-    canvas.fillRoundRect(RPANEL_X + 78, vy + 24, 33, 15, 3, cBtnCol);
+    // Volume buttons: [ - ] [ MUTE ] [ + ]
+    bool muted = (vol == 0);
+    uint16_t muteCol = muted ? TFT_RED : cBtnCol;
+    canvas.fillRoundRect(RPANEL_X + 4,  vy + 26, 33, 15, 3, cBtnCol);
+    canvas.fillRoundRect(RPANEL_X + 41, vy + 26, 33, 15, 3, muteCol);
+    canvas.fillRoundRect(RPANEL_X + 78, vy + 26, 33, 15, 3, cBtnCol);
     canvas.setTextColor(cBright, cBtnCol);
-    canvas.drawString(" - ", RPANEL_X + 10,  vy + 27, 1);
+    canvas.drawCenterString("-",    RPANEL_X + 20,  vy + 30, 1);
     canvas.setTextColor(cBright, muteCol);
-    canvas.drawString("MUTE", RPANEL_X + 44, vy + 27, 1);
+    canvas.drawCenterString("MUTE", RPANEL_X + 57,  vy + 30, 1);
     canvas.setTextColor(cBright, cBtnCol);
-    canvas.drawString(" + ", RPANEL_X + 87, vy + 27, 1);
+    canvas.drawCenterString("+",    RPANEL_X + 94,  vy + 30, 1);
 
     // ── Right panel: Bitrate ──
-    int by = vy + 46;
+    int by = vy + 48;
     canvas.fillRect(RPANEL_X, by, RPANEL_W, 16, cPanel);
     canvas.drawRect(RPANEL_X, by, RPANEL_W, 16, cBorder);
     canvas.setTextColor(TFT_GREEN, cPanel);
     {
         char buf[24];
         snprintf(buf, sizeof(buf), "BITRATE %ldk", bitrate);
-        canvas.drawString(buf, RPANEL_X + 4, by + 3, 1);
+        canvas.drawString(buf, RPANEL_X + 6, by + 4, 1);
     }
 
     // ── Song title area ──
-    canvas.fillRect(2, TICKER_REGION_Y, 316, 14, cBg);
     canvas.setTextColor(cDim, cBg);
-    canvas.drawString("NOW PLAYING", 6, TICKER_REGION_Y + 2, 1);
+    canvas.drawString("NOW PLAYING", 6, TICKER_REGION_Y, 1);
 
-    canvas.fillRect(2, TICKER_Y - 4, 316, TICKER_H + 6, cPanel);
-    canvas.drawRect(2, TICKER_Y - 4, 316, TICKER_H + 6, cBorder);
+    int tickerBoxY = TICKER_Y - 2;
+    int tickerBoxH = 240 - tickerBoxY;
+    canvas.fillRect(2, tickerBoxY, 316, tickerBoxH, cPanel);
+    canvas.drawRect(2, tickerBoxY, 316, tickerBoxH, cBorder);
     canvas.setTextColor(cBright, cPanel);
-    canvas.drawString(songTitle, songScrollX + 4, TICKER_Y - 2, 2);
+    canvas.drawString(songTitle, songScrollX + 4, TICKER_Y, 2);
 
     // Outer frame
     canvas.drawRect(0, 0, 320, 240, cBorder);
 
-    // Single push — no flicker
     canvas.pushSprite(0, 0);
 }
 
@@ -281,9 +285,9 @@ static void handleTouch() {
         }
     }
 
-    // Volume/Mute buttons — right panel (generous hit area for touch offset)
-    int volPanelY = HDR_H + 2 + 60 + 42;  // vy = 120
-    if (tx > RPANEL_X && ty >= volPanelY + 10 && ty <= volPanelY + 52) {
+    // Volume/Mute buttons — right panel
+    int volPanelY = HDR_H + 4 + 60 + 42;  // vy
+    if (tx > RPANEL_X && ty >= volPanelY + 12 && ty <= volPanelY + 52) {
         if (tx < RPANEL_X + 37 && vol > 0) {
             vol--;
             audio.setVolume(vol);
@@ -304,6 +308,8 @@ static void handleTouch() {
 }
 
 static bool prevBoot = false;
+static bool prevMute = false;
+static unsigned long lastMuteMs = 0;
 
 static void handleButtons() {
     // Boot button — next station
@@ -317,6 +323,18 @@ static void handleButtons() {
         saveStation();
     }
     prevBoot = boot;
+
+    // Hardware mute button (toggle switch on top) — trigger on any edge
+    bool mute = (digitalRead(BTN_MUTE) == HIGH);
+    unsigned long now = millis();
+    if (mute != prevMute && (now - lastMuteMs > 300)) {
+        lastMuteMs = now;
+        if (vol > 0) { savedVol = vol; vol = 0; }
+        else         { vol = savedVol; }
+        audio.setVolume(vol);
+        saveStation();
+    }
+    prevMute = mute;
 }
 
 // ─── Setup ────────────────────────────────────────────────
@@ -331,6 +349,7 @@ void setup() {
     Wire.begin(I2C_SDA, I2C_SCL);
 
     pinMode(BTN_BOOT, INPUT_PULLUP);
+    pinMode(BTN_MUTE, INPUT_PULLDOWN);
 
     // Keep PA off until audio is ready to avoid noise
     pinMode(PA_PIN, OUTPUT);

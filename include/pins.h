@@ -29,6 +29,7 @@
 
 // Buttons
 #define BTN_BOOT    0
+#define BTN_MUTE    1   // Red button on top of BOX-3 (active LOW)
 
 // ES8311 codec clock configuration
 #define ES8311_SAMPLE_RATE      16000
