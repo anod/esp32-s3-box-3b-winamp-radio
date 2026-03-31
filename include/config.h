@@ -13,5 +13,5 @@
 #endif
 
 // Audio
-#define DEFAULT_VOLUME  10   // 0–21
+#define DEFAULT_VOLUME  15   // 0–21
 #define MAX_VOLUME      21

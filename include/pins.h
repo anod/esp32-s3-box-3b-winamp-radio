@@ -1,5 +1,5 @@
 // ============================================================
-// ESP32-S3-BOX (v1) — Pin Definitions
+// ESP32-S3-BOX-3 — Pin Definitions
 // ============================================================
 
 #pragma once
@@ -7,11 +7,10 @@
 // I2S Audio (ES8311 codec)
 #define I2S_MCLK    2
 #define I2S_BCLK    17
-#define I2S_LRCK    47
+#define I2S_LRCK    45
 #define I2S_DOUT    15
-#define I2S_DIN     16
 
-// I2C (shared bus: ES8311 + TT21100 touch)
+// I2C (shared bus: ES8311 codec + GT911 touch)
 #define I2C_SDA     8
 #define I2C_SCL     18
 
@@ -20,10 +19,9 @@
 #define LCD_MOSI    6
 #define LCD_CS      5
 #define LCD_DC      4
-#define LCD_RST     48
-#define LCD_BL      45
+#define LCD_BL      47
 
-// Touch — TT21100 capacitive controller
+// Touch — GT911 capacitive controller
 #define TOUCH_INT   3
 
 // Power amplifier enable
@@ -31,7 +29,6 @@
 
 // Buttons
 #define BTN_BOOT    0
-#define BTN_MUTE    1
 
 // ES8311 codec clock configuration
 #define ES8311_SAMPLE_RATE      16000

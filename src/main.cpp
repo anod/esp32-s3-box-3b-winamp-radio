@@ -1,143 +1,76 @@
 // ============================================================
-// ESP32-S3-BOX Internet Radio
-// Based on VolosR/WaveshareRadioStream, adapted for ESP32-S3-BOX (v1)
-// Display: 320x240 ILI9342C | Audio: ES8311 | Touch: TT21100
+// ESP32-S3-BOX-3 Internet Radio
+// Based on VolosR/WaveshareRadioStream, adapted for ESP32-S3-BOX-3
+// Display: 320x240 ILI9342C | Audio: ES8311 | Touch: GT911
 // ============================================================
 
 #include <Arduino.h>
 #include <WiFi.h>
 #include <Audio.h>
+#include <Preferences.h>
 #define LGFX_USE_V1
+#define LGFX_AUTODETECT
 #include <LovyanGFX.hpp>
 #include <Wire.h>
 #include "config.h"
 #include "pins.h"
 #include "es8311.h"
 
-// ─── Display configuration for ESP32-S3-BOX (v1) ─────────
-
-class LGFX : public lgfx::LGFX_Device {
-    lgfx::Panel_ILI9342  _panel_instance;
-    lgfx::Bus_SPI        _bus_instance;
-    lgfx::Light_PWM      _light_instance;
-    lgfx::Touch_TT21xxx  _touch_instance;
-
-public:
-    LGFX(void) {
-        {
-            auto cfg = _bus_instance.config();
-            cfg.spi_host    = SPI3_HOST;
-            cfg.spi_mode    = 0;
-            cfg.freq_write  = 40000000;
-            cfg.freq_read   = 16000000;
-            cfg.spi_3wire   = false;
-            cfg.use_lock    = true;
-            cfg.dma_channel = SPI_DMA_CH_AUTO;
-            cfg.pin_sclk    = LCD_SCK;
-            cfg.pin_mosi    = LCD_MOSI;
-            cfg.pin_miso    = -1;
-            cfg.pin_dc      = LCD_DC;
-            _bus_instance.config(cfg);
-            _panel_instance.setBus(&_bus_instance);
-        }
-        {
-            auto cfg = _panel_instance.config();
-            cfg.pin_cs          = LCD_CS;
-            cfg.pin_rst         = LCD_RST;
-            cfg.pin_busy        = -1;
-            cfg.memory_width    = 320;
-            cfg.memory_height   = 240;
-            cfg.panel_width     = 320;
-            cfg.panel_height    = 240;
-            cfg.offset_x        = 0;
-            cfg.offset_y        = 0;
-            cfg.offset_rotation = 0;
-            cfg.dummy_read_pixel = 8;
-            cfg.dummy_read_bits  = 1;
-            cfg.readable        = true;
-            cfg.invert          = true;
-            cfg.rgb_order       = false;
-            cfg.dlen_16bit      = false;
-            cfg.bus_shared      = false;
-            _panel_instance.config(cfg);
-        }
-        {
-            auto cfg = _light_instance.config();
-            cfg.pin_bl      = LCD_BL;
-            cfg.invert      = false;
-            cfg.freq        = 44100;
-            cfg.pwm_channel = 7;
-            _light_instance.config(cfg);
-            _panel_instance.setLight(&_light_instance);
-        }
-        {
-            auto cfg = _touch_instance.config();
-            cfg.x_min           = 0;
-            cfg.x_max           = 319;
-            cfg.y_min           = 0;
-            cfg.y_max           = 239;
-            cfg.pin_int         = TOUCH_INT;
-            cfg.bus_shared      = false;
-            cfg.offset_rotation = 0;
-            cfg.i2c_port        = I2C_NUM_1;
-            cfg.i2c_addr        = 0x24;
-            cfg.pin_sda         = I2C_SDA;
-            cfg.pin_scl         = I2C_SCL;
-            cfg.freq            = 400000;
-            _touch_instance.config(cfg);
-            _panel_instance.setTouch(&_touch_instance);
-        }
-        setPanel(&_panel_instance);
-    }
-};
-
 // ─── Globals ──────────────────────────────────────────────
 
 static LGFX       tft;
 static LGFX_Sprite canvas(&tft);
-static LGFX_Sprite ticker(&tft);
 static Audio       audio;
+static Preferences prefs;
 
 // Station list
-#define NUM_STATIONS 8
+#define NUM_STATIONS 10
 static const char* stationUrls[NUM_STATIONS] = {
-    "http://stream.live.vc.bbcmedia.co.uk/bbc_radio_two",
-    "https://discodiamond.radioca.st/autodj",
-    "http://sc6.radiocaroline.net:8040/stream",
-    "https://listen.radioking.com/radio/175279/stream/216784",
-    "https://club-high.rautemusik.fm/;",
-    "http://greece-media.monroe.edu/wgmc.mp3",
-    "https://audio.radio-banovina.hr:9998/;",
-    "http://icecast.vrtcdn.be/stubru-high.mp3"
+    "http://ice1.somafm.com/groovesalad-128-mp3",            // Electronic / Chill
+    "http://ice1.somafm.com/thetrip-128-mp3",                // Trance / Progressive
+    "http://hirschmilch.de:7000/psytrance.mp3",              // Psytrance
+    "http://stream.rockantenne.de/rockantenne/stream/mp3",   // Rock
+    "http://listen.181fm.com/181-hardrock_128k.mp3",         // Hard Rock
+    "http://stream.rockantenne.de/heavy-metal/stream/mp3",   // Metal
+    "http://listen.181fm.com/181-power_128k.mp3",            // Pop / Top 40
+    "http://stream.radioparadise.com/mp3-128",               // Eclectic Mix
+    "http://stream.live.vc.bbcmedia.co.uk/bbc_world_service", // News (BBC)
+    "http://npr-ice.streamguys1.com/live.mp3"                // News (NPR)
 };
 static const char* stationNames[NUM_STATIONS] = {
-    "BBC Radio 2",
-    "Disco Diamond",
-    "Radio Caroline",
-    "RadioKing",
-    "RauteMusik Club",
-    "WGMC Jazz",
-    "Radio Banovina",
-    "Studio Brussel"
+    "Groove Salad",
+    "The Trip",
+    "Psytrance",
+    "Rock Antenne",
+    "181 Hard Rock",
+    "Heavy Metal",
+    "181 Power Hits",
+    "Radio Paradise",
+    "BBC World News",
+    "NPR News"
 };
 
-// State
-static int    currentStation  = 0;
-static int    vol             = DEFAULT_VOLUME;
-static String songTitle       = "";
-static long   bitrate         = 0;
-static bool   wifiConnected   = false;
-static int    wifiRssi        = 0;
-static int    songScrollX     = 320;
-static bool   needsRedraw     = true;
+// State (shared between Core 0 audio task and Core 1 render loop)
+static volatile int    currentStation  = 0;
+static volatile int    vol             = DEFAULT_VOLUME;
+static char            songTitle[128]  = "";
+static volatile long   bitrate         = 0;
+static volatile bool   wifiConnected   = false;
+static volatile int    wifiRssi        = 0;
+static int             songScrollX     = 320;
+static char            id3Artist[64]   = "";
+static char            id3Title[64]    = "";
+static char            ipAddress[20]   = "";
 
 // Timing
+static unsigned long lastFrameMs   = 0;
 static unsigned long lastStatusMs  = 0;
-static unsigned long lastTickerMs  = 0;
 static unsigned long lastTouchMs   = 0;
+static unsigned long lastVisMs     = 0;
 
 // Visualiser bars
-static int graphBars[14] = {0};
+static int graphBars[12] = {0};
+static uint16_t barColors[6];  // pre-computed gradient
 
 // UI layout constants
 static constexpr int LPANEL_W   = 198;
@@ -145,18 +78,45 @@ static constexpr int RPANEL_X   = 202;
 static constexpr int RPANEL_W   = 116;
 static constexpr int HDR_H      = 16;
 static constexpr int STA_Y      = 20;
-static constexpr int STA_LINE   = 21;
+static constexpr int STA_LINE   = 18;
 static constexpr int TICKER_Y   = 220;
 static constexpr int TICKER_H   = 18;
+static constexpr int TICKER_REGION_Y = 200;   // top of ticker region (includes label)
+static constexpr int TICKER_REGION_H = 40;    // full height to bottom of screen
 
-// Theme colours (set once in setup)
+// Theme colours (computed once in setup)
 static uint16_t cBg, cPanel, cBorder, cAccent, cDim, cBright;
+static uint16_t cStationHl, cStationDim, cBarBg, cBtnCol;
+
+// Retained ES8311 handle (avoid leak)
+static es8311_handle_t esHandle = nullptr;
+
+// Forward declarations
+void audioCallback(Audio::msg_t msg);
+static void audioTask(void *param);
+
+static void saveStation() {
+    prefs.begin("radio", false);
+    prefs.putInt("station", currentStation);
+    prefs.putInt("volume", vol);
+    prefs.end();
+}
+
+static void loadStation() {
+    prefs.begin("radio", true);
+    currentStation = prefs.getInt("station", 0);
+    vol = prefs.getInt("volume", DEFAULT_VOLUME);
+    prefs.end();
+    if (currentStation < 0 || currentStation >= NUM_STATIONS) currentStation = 0;
+    if (vol < 0 || vol > MAX_VOLUME) vol = DEFAULT_VOLUME;
+    Serial.printf("Restored station %d, volume %d\n", currentStation, vol);
+}
 
 // ─── ES8311 codec init ───────────────────────────────────
 
 static bool initCodec() {
-    es8311_handle_t es = es8311_create(I2C_NUM_0, ES8311_ADDRRES_0);
-    if (!es) { Serial.println("ES8311 create failed"); return false; }
+    esHandle = es8311_create(I2C_NUM_0, ES8311_ADDRRES_0);
+    if (!esHandle) { Serial.println("ES8311 create failed"); return false; }
 
     const es8311_clock_config_t clk = {
         .mclk_inverted    = false,
@@ -166,20 +126,20 @@ static bool initCodec() {
         .sample_frequency = ES8311_SAMPLE_RATE
     };
 
-    if (es8311_init(es, &clk, ES8311_RESOLUTION_16, ES8311_RESOLUTION_16) != ESP_OK) {
+    if (es8311_init(esHandle, &clk, ES8311_RESOLUTION_16, ES8311_RESOLUTION_16) != ESP_OK) {
         Serial.println("ES8311 init failed");
         return false;
     }
-    es8311_sample_frequency_config(es, ES8311_MCLK_FREQ_HZ, ES8311_SAMPLE_RATE);
-    es8311_voice_volume_set(es, ES8311_VOICE_VOLUME, NULL);
-    es8311_microphone_config(es, false);
+    es8311_sample_frequency_config(esHandle, ES8311_MCLK_FREQ_HZ, ES8311_SAMPLE_RATE);
+    es8311_voice_volume_set(esHandle, ES8311_VOICE_VOLUME, NULL);
+    es8311_microphone_config(esHandle, false);
     Serial.println("ES8311 codec OK");
     return true;
 }
 
-// ─── Drawing ──────────────────────────────────────────────
+// ─── Drawing (single canvas, one push per frame) ─────────
 
-static void drawUI() {
+static void drawFrame() {
     canvas.fillSprite(cBg);
 
     // ── Left panel: station list ──
@@ -187,26 +147,22 @@ static void drawUI() {
     canvas.drawRect(2, HDR_H + 2, LPANEL_W - 4, NUM_STATIONS * STA_LINE + 8, cBorder);
     canvas.fillRect(4, HDR_H, LPANEL_W - 8, 2, cAccent);
 
-    // Header labels
     canvas.setTextColor(cBright, cBg);
     canvas.drawString("STATIONS", 56, 2, 2);
     canvas.drawString("INTERNET RADIO", RPANEL_X, 2, 2);
 
-    // Station entries
     for (int i = 0; i < NUM_STATIONS; i++) {
         int y = STA_Y + 4 + i * STA_LINE;
         if (i == currentStation) {
-            uint16_t hl = canvas.color565(0, 40, 0);
-            canvas.fillRect(4, y - 1, LPANEL_W - 8, STA_LINE - 2, hl);
-            canvas.setTextColor(TFT_GREEN, hl);
+            canvas.fillRect(4, y - 1, LPANEL_W - 8, STA_LINE - 2, cStationHl);
+            canvas.setTextColor(TFT_GREEN, cStationHl);
             canvas.drawString(">", 8, y, 2);
         } else {
-            canvas.setTextColor(canvas.color565(0, 140, 0), cPanel);
+            canvas.setTextColor(cStationDim, cPanel);
         }
         canvas.drawString(stationNames[i], 24, y, 2);
     }
 
-    // Divider between panels
     canvas.fillRect(LPANEL_W, HDR_H + 2, 3, NUM_STATIONS * STA_LINE + 8, cBorder);
 
     // ── Right panel: WiFi ──
@@ -220,10 +176,14 @@ static void drawUI() {
     canvas.setTextColor(wifiConnected ? TFT_GREEN : TFT_RED, cPanel);
     canvas.drawString(wifiConnected ? "CONNECTED" : "OFFLINE", RPANEL_X + 4, ry + 16, 1);
     canvas.setTextColor(cBright, cPanel);
-    canvas.drawString("RSSI:" + String(wifiRssi), RPANEL_X + 4, ry + 28, 1);
+    {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "RSSI:%d", wifiRssi);
+        canvas.drawString(buf, RPANEL_X + 4, ry + 28, 1);
+    }
     if (wifiConnected) {
         canvas.setTextColor(cDim, cPanel);
-        canvas.drawString(WiFi.localIP().toString(), RPANEL_X + 4, ry + 40, 1);
+        canvas.drawString(ipAddress, RPANEL_X + 4, ry + 40, 1);
     }
 
     // ── Right panel: Visualiser ──
@@ -231,10 +191,8 @@ static void drawUI() {
     canvas.fillRect(RPANEL_X, gy, RPANEL_W, 38, cPanel);
     canvas.drawRect(RPANEL_X, gy, RPANEL_W, 38, cBorder);
     for (int i = 0; i < 12; i++) {
-        if (wifiConnected) graphBars[i] = random(1, 6);
         for (int j = 0; j < graphBars[i]; j++) {
-            uint16_t bc = canvas.color565(0, 100 + j * 30, 50 + j * 20);
-            canvas.fillRect(RPANEL_X + 6 + i * 9, gy + 30 - j * 6, 7, 5, bc);
+            canvas.fillRect(RPANEL_X + 6 + i * 9, gy + 30 - j * 6, 7, 5, barColors[j]);
         }
     }
 
@@ -249,55 +207,55 @@ static void drawUI() {
     int barW = RPANEL_W - 16;
     int barX = RPANEL_X + 8;
     int barY = vy + 14;
-    canvas.fillRoundRect(barX, barY, barW, 4, 2, canvas.color565(60, 60, 60));
+    canvas.fillRoundRect(barX, barY, barW, 4, 2, cBarBg);
     int fillW = (vol * barW) / MAX_VOLUME;
     canvas.fillRoundRect(barX, barY, fillW, 4, 2, TFT_YELLOW);
     int knobX = barX + fillW - 4;
     if (knobX < barX) knobX = barX;
     canvas.fillRoundRect(knobX, barY - 4, 8, 12, 3, cBright);
 
-    // +/- buttons
-    uint16_t btnCol = canvas.color565(80, 80, 100);
-    canvas.fillRoundRect(RPANEL_X + 6,  vy + 24, 46, 15, 3, btnCol);
-    canvas.fillRoundRect(RPANEL_X + 62, vy + 24, 46, 15, 3, btnCol);
-    canvas.setTextColor(cBright, btnCol);
-    canvas.drawString("VOL -", RPANEL_X + 10,  vy + 27, 1);
-    canvas.drawString("VOL +", RPANEL_X + 66, vy + 27, 1);
+    uint16_t muteCol = (vol == 0) ? TFT_RED : cBtnCol;
+    canvas.fillRoundRect(RPANEL_X + 4,  vy + 24, 33, 15, 3, cBtnCol);
+    canvas.fillRoundRect(RPANEL_X + 41, vy + 24, 33, 15, 3, muteCol);
+    canvas.fillRoundRect(RPANEL_X + 78, vy + 24, 33, 15, 3, cBtnCol);
+    canvas.setTextColor(cBright, cBtnCol);
+    canvas.drawString(" - ", RPANEL_X + 10,  vy + 27, 1);
+    canvas.setTextColor(cBright, muteCol);
+    canvas.drawString("MUTE", RPANEL_X + 44, vy + 27, 1);
+    canvas.setTextColor(cBright, cBtnCol);
+    canvas.drawString(" + ", RPANEL_X + 87, vy + 27, 1);
 
     // ── Right panel: Bitrate ──
     int by = vy + 46;
     canvas.fillRect(RPANEL_X, by, RPANEL_W, 16, cPanel);
     canvas.drawRect(RPANEL_X, by, RPANEL_W, 16, cBorder);
     canvas.setTextColor(TFT_GREEN, cPanel);
-    canvas.drawString("BITRATE " + String(bitrate) + "k", RPANEL_X + 4, by + 3, 1);
+    {
+        char buf[24];
+        snprintf(buf, sizeof(buf), "BITRATE %ldk", bitrate);
+        canvas.drawString(buf, RPANEL_X + 4, by + 3, 1);
+    }
 
     // ── Song title area ──
-    canvas.fillRect(2, 200, 316, 14, cBg);
+    canvas.fillRect(2, TICKER_REGION_Y, 316, 14, cBg);
     canvas.setTextColor(cDim, cBg);
-    canvas.drawString("NOW PLAYING", 6, 202, 1);
+    canvas.drawString("NOW PLAYING", 6, TICKER_REGION_Y + 2, 1);
 
     canvas.fillRect(2, TICKER_Y - 4, 316, TICKER_H + 6, cPanel);
     canvas.drawRect(2, TICKER_Y - 4, 316, TICKER_H + 6, cBorder);
+    canvas.setTextColor(cBright, cPanel);
+    canvas.drawString(songTitle, songScrollX + 4, TICKER_Y - 2, 2);
 
     // Outer frame
     canvas.drawRect(0, 0, 320, 240, cBorder);
 
+    // Single push — no flicker
     canvas.pushSprite(0, 0);
-    needsRedraw = false;
-}
-
-static void drawTicker() {
-    songScrollX -= 2;
-    int tw = songTitle.length() * 7;
-    if (songScrollX < -tw) songScrollX = 310;
-
-    ticker.fillSprite(cPanel);
-    ticker.setTextColor(cBright, cPanel);
-    ticker.drawString(songTitle, songScrollX, 2, 2);
-    ticker.pushSprite(4, TICKER_Y - 2);
 }
 
 // ─── Input handling ───────────────────────────────────────
+
+static int  savedVol = DEFAULT_VOLUME;
 
 static void handleTouch() {
     lgfx::touch_point_t tp;
@@ -309,96 +267,98 @@ static void handleTouch() {
 
     int tx = tp.x, ty = tp.y;
 
-    // Station selection
-    if (tx < LPANEL_W && ty > STA_Y && ty < STA_Y + NUM_STATIONS * STA_LINE) {
+    // Station selection — left panel
+    if (tx < LPANEL_W && ty > STA_Y && ty < STA_Y + NUM_STATIONS * STA_LINE + 10) {
         int idx = (ty - STA_Y - 4) / STA_LINE;
         if (idx >= 0 && idx < NUM_STATIONS && idx != currentStation) {
             currentStation = idx;
-            songTitle  = "Connecting...";
+            strlcpy(songTitle, "Connecting...", sizeof(songTitle));
+            id3Artist[0] = '\0'; id3Title[0] = '\0'; bitrate = 0;
             songScrollX = 10;
             audio.connecttohost(stationUrls[currentStation]);
-            needsRedraw = true;
             Serial.printf("Station: %s\n", stationNames[currentStation]);
+            saveStation();
         }
     }
 
-    // Volume buttons
-    int vy = HDR_H + 2 + 56 + 38 + 42 + 24;   // matches VOL button Y
-    if (ty > vy && ty < vy + 15) {
-        if (tx > RPANEL_X + 6 && tx < RPANEL_X + 52 && vol > 0) {
+    // Volume/Mute buttons — right panel (generous hit area for touch offset)
+    int volPanelY = HDR_H + 2 + 60 + 42;  // vy = 120
+    if (tx > RPANEL_X && ty >= volPanelY + 10 && ty <= volPanelY + 52) {
+        if (tx < RPANEL_X + 37 && vol > 0) {
             vol--;
             audio.setVolume(vol);
-            needsRedraw = true;
+            saveStation();
         }
-        if (tx > RPANEL_X + 62 && tx < RPANEL_X + 108 && vol < MAX_VOLUME) {
+        else if (tx >= RPANEL_X + 38 && tx < RPANEL_X + 76) {
+            if (vol > 0) { savedVol = vol; vol = 0; }
+            else         { vol = savedVol; }
+            audio.setVolume(vol);
+            saveStation();
+        }
+        else if (tx >= RPANEL_X + 76 && vol < MAX_VOLUME) {
             vol++;
             audio.setVolume(vol);
-            needsRedraw = true;
+            saveStation();
         }
     }
 }
 
 static bool prevBoot = false;
-static bool prevMute = false;
-static int  savedVol = DEFAULT_VOLUME;
 
 static void handleButtons() {
     // Boot button — next station
     bool boot = (digitalRead(BTN_BOOT) == LOW);
     if (boot && !prevBoot) {
         currentStation = (currentStation + 1) % NUM_STATIONS;
-        songTitle  = "Connecting...";
+        strlcpy(songTitle, "Connecting...", sizeof(songTitle));
+        id3Artist[0] = '\0'; id3Title[0] = '\0'; bitrate = 0;
         songScrollX = 10;
         audio.connecttohost(stationUrls[currentStation]);
-        needsRedraw = true;
+        saveStation();
     }
     prevBoot = boot;
-
-    // Mute button — toggle mute
-    bool mute = (digitalRead(BTN_MUTE) == LOW);
-    if (mute && !prevMute) {
-        if (vol > 0) { savedVol = vol; vol = 0; }
-        else         { vol = savedVol; }
-        audio.setVolume(vol);
-        needsRedraw = true;
-    }
-    prevMute = mute;
 }
 
 // ─── Setup ────────────────────────────────────────────────
 
 void setup() {
     Serial.begin(115200);
-    Serial.println("\n=== ESP32-S3-BOX Internet Radio ===");
+    Serial.println("\n=== ESP32-S3-BOX-3 Internet Radio ===");
 
+    loadStation();
+
+    // I2C for ES8311 codec (port 0, shared with touch)
     Wire.begin(I2C_SDA, I2C_SCL);
 
     pinMode(BTN_BOOT, INPUT_PULLUP);
-    pinMode(BTN_MUTE, INPUT_PULLUP);
 
-    // Enable power amplifier
+    // Keep PA off until audio is ready to avoid noise
     pinMode(PA_PIN, OUTPUT);
-    digitalWrite(PA_PIN, HIGH);
+    digitalWrite(PA_PIN, LOW);
 
     initCodec();
 
     // Display
     tft.init();
-    tft.setRotation(0);
     tft.setBrightness(160);
     tft.fillScreen(TFT_BLACK);
 
     canvas.setColorDepth(16);
+    canvas.setPsram(true);
     canvas.createSprite(320, 240);
-    ticker.setColorDepth(16);
-    ticker.createSprite(312, TICKER_H);
 
-    cBg     = canvas.color565(50, 50, 60);
-    cPanel  = TFT_BLACK;
-    cBorder = canvas.color565(100, 100, 120);
-    cAccent = TFT_ORANGE;
-    cDim    = canvas.color565(120, 120, 120);
-    cBright = canvas.color565(220, 220, 255);
+    cBg        = canvas.color565(50, 50, 60);
+    cPanel     = TFT_BLACK;
+    cBorder    = canvas.color565(100, 100, 120);
+    cAccent    = TFT_ORANGE;
+    cDim       = canvas.color565(120, 120, 120);
+    cBright    = canvas.color565(220, 220, 255);
+    cStationHl = canvas.color565(0, 40, 0);
+    cStationDim= canvas.color565(0, 140, 0);
+    cBarBg     = canvas.color565(60, 60, 60);
+    cBtnCol    = canvas.color565(80, 80, 100);
+    for (int j = 0; j < 6; j++)
+        barColors[j] = canvas.color565(0, 100 + j * 30, 50 + j * 20);
 
     tft.setTextColor(TFT_GREEN, TFT_BLACK);
     tft.setTextSize(2);
@@ -421,74 +381,171 @@ void setup() {
     Serial.println();
 
     wifiConnected = (WiFi.status() == WL_CONNECTED);
-    if (wifiConnected)
-        Serial.printf("Connected! IP: %s\n", WiFi.localIP().toString().c_str());
-    else
+    if (wifiConnected) {
+        strlcpy(ipAddress, WiFi.localIP().toString().c_str(), sizeof(ipAddress));
+        Serial.printf("Connected! IP: %s\n", ipAddress);
+    } else {
         Serial.println("WiFi connection failed");
+    }
 
     // Audio
+    Audio::audio_info_callback = audioCallback;
     audio.setPinout(I2S_BCLK, I2S_LRCK, I2S_DOUT, I2S_MCLK);
     audio.setVolume(vol);
+    audio.setConnectionTimeout(5000, 0);
 
     if (wifiConnected) {
-        songTitle = "Connecting...";
+        strlcpy(songTitle, "Connecting...", sizeof(songTitle));
+        Serial.printf("Connecting to: %s\n", stationUrls[currentStation]);
         audio.connecttohost(stationUrls[currentStation]);
+        delay(200);
+        digitalWrite(PA_PIN, HIGH);
     } else {
-        songTitle = "WiFi not connected";
+        strlcpy(songTitle, "WiFi not connected", sizeof(songTitle));
     }
 
-    needsRedraw = true;
+    // Start audio on Core 0 (WiFi core) — rendering stays on Core 1
+    xTaskCreatePinnedToCore(audioTask, "audio", 8192, NULL, 2, NULL, 0);
+
+    drawFrame();
 }
 
-// ─── Loop ─────────────────────────────────────────────────
+// ─── Audio task (Core 0) ──────────────────────────────────
+
+static void audioTask(void *param) {
+    for (;;) {
+        audio.loop();
+        vTaskDelay(1);
+    }
+}
+
+// ─── Loop (Core 1 — rendering + input) ───────────────────
 
 void loop() {
-    audio.loop();
-
     unsigned long now = millis();
 
-    // Periodic status update
-    if (now - lastStatusMs > 500) {
-        lastStatusMs  = now;
-        wifiRssi      = WiFi.RSSI();
-        wifiConnected = (WiFi.status() == WL_CONNECTED);
-        needsRedraw   = true;
+    // Animate visualiser bars
+    if (now - lastVisMs > 200) {
+        lastVisMs = now;
+        if (wifiConnected) {
+            for (int i = 0; i < 12; i++) graphBars[i] = random(1, 6);
+        }
     }
 
-    // Scroll song ticker
-    if (now - lastTickerMs > 40) {
-        lastTickerMs = now;
-        drawTicker();
+    // Periodic WiFi status update
+    if (now - lastStatusMs > 2000) {
+        lastStatusMs = now;
+        bool wasConnected = wifiConnected;
+        wifiConnected = (WiFi.status() == WL_CONNECTED);
+        if (wifiConnected) {
+            wifiRssi = WiFi.RSSI();
+            if (!wasConnected) {
+                strlcpy(ipAddress, WiFi.localIP().toString().c_str(), sizeof(ipAddress));
+                Serial.println("WiFi reconnected, resuming stream");
+                audio.connecttohost(stationUrls[currentStation]);
+                strlcpy(songTitle, "Reconnecting...", sizeof(songTitle));
+            }
+        } else {
+            wifiRssi = 0;
+            if (wasConnected) {
+                Serial.println("WiFi lost, attempting reconnect");
+                WiFi.reconnect();
+            }
+        }
     }
 
     handleTouch();
     handleButtons();
 
-    if (needsRedraw) drawUI();
+    // Render frame at ~15fps (66ms) — never starves audio (separate core)
+    if (now - lastFrameMs > 66) {
+        lastFrameMs = now;
+        songScrollX -= 2;
+        int tw = strlen(songTitle) * 7;
+        if (songScrollX < -tw) songScrollX = 310;
+        drawFrame();
+    }
 
     vTaskDelay(1);
 }
 
-// ─── Audio callbacks ──────────────────────────────────────
+// ─── Audio callback ───────────────────────────────────────
 
-void audio_info(const char *info) {
-    Serial.printf("info: %s\n", info);
+static void updateId3SongTitle() {
+    char newTitle[128];
+    if (id3Title[0] && id3Artist[0]) {
+        snprintf(newTitle, sizeof(newTitle), "%s - %s", id3Artist, id3Title);
+    } else if (id3Title[0]) {
+        strlcpy(newTitle, id3Title, sizeof(newTitle));
+    } else if (id3Artist[0]) {
+        strlcpy(newTitle, id3Artist, sizeof(newTitle));
+    } else {
+        return;
+    }
+    if (strcmp(songTitle, newTitle) != 0) {
+        strlcpy(songTitle, newTitle, sizeof(songTitle));
+        songScrollX = 310;
+    }
 }
 
-void audio_showstation(const char *info) {
-    Serial.printf("station: %s\n", info);
-    needsRedraw = true;
-}
-
-void audio_showstreamtitle(const char *info) {
-    Serial.printf("title: %s\n", info);
-    songTitle   = info;
-    songScrollX = 310;
-    needsRedraw = true;
-}
-
-void audio_bitrate(const char *info) {
-    Serial.printf("bitrate: %s\n", info);
-    bitrate     = String(info).toInt() / 1000;
-    needsRedraw = true;
+void audioCallback(Audio::msg_t msg) {
+    switch (msg.e) {
+        case Audio::evt_info:
+            Serial.printf("info: %s\n", msg.msg);
+            if (msg.msg && strncmp(msg.msg, "BitRate:", 8) == 0) {
+                long br = atol(msg.msg + 8);
+                if (br > 0) {
+                    bitrate = (br >= 1000) ? br / 1000 : br;
+                }
+            }
+            break;
+        case Audio::evt_id3data:
+            Serial.printf("id3: %s\n", msg.msg);
+            if (msg.msg) {
+                if (strncmp(msg.msg, "Title: ", 7) == 0) {
+                    strlcpy(id3Title, msg.msg + 7, sizeof(id3Title));
+                    updateId3SongTitle();
+                } else if (strncmp(msg.msg, "Artist: ", 8) == 0) {
+                    strlcpy(id3Artist, msg.msg + 8, sizeof(id3Artist));
+                    updateId3SongTitle();
+                }
+            }
+            break;
+        case Audio::evt_name:
+            Serial.printf("station: %s\n", msg.msg);
+            if (songTitle[0] == '\0' || strcmp(songTitle, "Connecting...") == 0 ||
+                strcmp(songTitle, "Reconnecting...") == 0) {
+                if (strcmp(songTitle, msg.msg) != 0) {
+                    strlcpy(songTitle, msg.msg, sizeof(songTitle));
+                    songScrollX = 310;
+                }
+            }
+            break;
+        case Audio::evt_streamtitle:
+            Serial.printf("title: %s\n", msg.msg);
+            if (msg.msg && msg.msg[0] != '\0' && strcmp(songTitle, msg.msg) != 0) {
+                strlcpy(songTitle, msg.msg, sizeof(songTitle));
+                songScrollX = 310;
+                id3Artist[0] = '\0';
+                id3Title[0] = '\0';
+            }
+            break;
+        case Audio::evt_bitrate:
+            Serial.printf("bitrate: %s\n", msg.msg);
+            if (msg.msg) {
+                long br = atol(msg.msg);
+                if (br > 0) {
+                    bitrate = (br >= 1000) ? br / 1000 : br;
+                }
+            }
+            break;
+        case Audio::evt_eof:
+            Serial.println("Stream ended");
+            break;
+        case Audio::evt_log:
+            Serial.printf("log: %s\n", msg.msg);
+            break;
+        default:
+            break;
+    }
 }
