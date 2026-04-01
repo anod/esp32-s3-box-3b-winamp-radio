@@ -85,7 +85,10 @@ static unsigned long touchHlMs    = 0;
 
 // Visualiser display state
 static float    displayBars[VIZ_BANDS]  = {0};    // smoothed bars for rendering
-static uint16_t barColors[6];            // pre-computed gradient
+static constexpr int MAX_SEGS = 10;               // segments per bar
+static constexpr int SEG_H    = 2;                // segment pixel height
+static constexpr int SEG_GAP  = 1;                // gap between segments
+static uint16_t segColors[MAX_SEGS];              // interpolated Winamp 2 gradient
 
 // UI layout constants
 static constexpr int LPANEL_W   = 198;
@@ -296,14 +299,16 @@ static void drawVisualizer() {
         int barW = 5, gap = 2;
         int totalW = VIZ_BANDS * barW + (VIZ_BANDS - 1) * gap;
         int startX = (VIZ_W - totalW) / 2;
+        int segStep = SEG_H + SEG_GAP;
+        int baseY = VIZ_H - 3;
         for (int i = 0; i < VIZ_BANDS; i++) {
-            int level = (int)(displayBars[i] + 0.5f);
-            if (level < 0) level = 0;
-            if (level > 5) level = 5;
-            int bh = level * 5 + 2;
+            int numSegs = (int)(displayBars[i] * (MAX_SEGS / 5.0f) + 0.5f);
+            if (numSegs > MAX_SEGS) numSegs = MAX_SEGS;
             int bx = startX + i * (barW + gap);
-            int by = VIZ_H - 3 - bh;
-            vizSprite.fillRect(bx, by, barW, bh, barColors[level]);
+            for (int s = 0; s < numSegs; s++) {
+                int sy = baseY - (s + 1) * segStep + SEG_GAP;
+                vizSprite.fillRect(bx, sy, barW, SEG_H, segColors[s]);
+            }
         }
     }
 
@@ -490,8 +495,20 @@ void setup() {
     cStationDim= canvas.color565(0, 140, 0);
     cBarBg     = canvas.color565(60, 60, 60);
     cBtnCol    = canvas.color565(80, 80, 100);
-    for (int j = 0; j < 6; j++)
-        barColors[j] = canvas.color565(0, 100 + j * 30, 50 + j * 20);
+    // Winamp 2 spectrum gradient: interpolate 6 key colors across MAX_SEGS segments
+    static const uint8_t refR[] = {0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF};
+    static const uint8_t refG[] = {0x40, 0x80, 0xFF, 0xFF, 0x80, 0x00};
+    static const uint8_t refB[] = {0x40, 0x00, 0x00, 0x00, 0x00, 0x00};
+    for (int s = 0; s < MAX_SEGS; s++) {
+        float t = s * 5.0f / (MAX_SEGS - 1);   // map segment to 0..5
+        int idx = (int)t;
+        if (idx > 4) idx = 4;
+        float f = t - idx;
+        uint8_t r = refR[idx] + (refR[idx + 1] - refR[idx]) * f;
+        uint8_t g = refG[idx] + (refG[idx + 1] - refG[idx]) * f;
+        uint8_t b = refB[idx] + (refB[idx + 1] - refB[idx]) * f;
+        segColors[s] = canvas.color565(r, g, b);
+    }
 
     tft.setTextColor(TFT_GREEN, TFT_BLACK);
     tft.setTextSize(2);
