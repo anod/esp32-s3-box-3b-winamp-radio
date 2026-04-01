@@ -45,4 +45,14 @@ PlatformIO Arduino firmware for the ESP32-S3-BOX-3 development board. Streams in
 - HTTPS streams fail with SSL memory allocation errors on ESP32 — use HTTP only.
 - `Wire.begin()` for ES8311 conflicts with LovyanGFX autodetect I2C init (harmless warning: "bus already initialized").
 - The PA pin (GPIO 46) must stay LOW during boot/codec init to prevent speaker noise. Enable after stream connects.
-- Touch coordinates from GT911 autodetect are already calibrated — no manual calibration needed.
+- Touch coordinates from GT911 autodetect have a Y offset (~+12px) — applied in `handleTouch()`.
+
+## Code Review Checklist
+
+When reviewing changes, always verify:
+
+- **Memory leaks**: No Arduino `String` in render loops, no `new`/`malloc` without matching `delete`/`free`, NVS handles closed with `prefs.end()`, sprites not re-created without `deleteSprite()`.
+- **Thread safety**: Never call `audio.*` methods (except `setVolume()`) from Core 1. Use `pendingConnect` flag pattern for cross-core audio commands. All cross-core shared state must be `volatile`.
+- **NVS flash wear**: Never call `saveStation()` in rapid-fire handlers (touch, buttons). Use `markDirty()`/`flushIfDirty()` for deferred writes.
+- **Draw loop cost**: No `color565()` calls, `WiFi.localIP().toString()`, or heap-allocating functions inside render loops. Pre-compute in `setup()`.
+- **Overflow**: `millis()` arithmetic must use unsigned subtraction. Intermediate touch/volume math must stay within `int` range.
