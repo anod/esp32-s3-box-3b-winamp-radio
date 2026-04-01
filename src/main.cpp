@@ -139,12 +139,32 @@ static es8311_handle_t esHandle = nullptr;
 void audioCallback(Audio::msg_t msg);
 static void audioTask(void *param);
 
+// Pending station change: set on Core 1, consumed on Core 0
+static volatile bool pendingConnect = false;
+
 static void saveStation() {
     prefs.begin("radio", false);
     prefs.putInt("station", currentStation);
     prefs.putInt("volume", vol);
     prefs.end();
     needsFullRedraw = true;
+}
+
+// Deferred NVS save: mark dirty, flush after idle period in loop()
+static bool     nvsDirty   = false;
+static unsigned long nvsDirtyMs = 0;
+
+static void markDirty() {
+    nvsDirty = true;
+    nvsDirtyMs = millis();
+    needsFullRedraw = true;
+}
+
+static void flushIfDirty() {
+    if (nvsDirty && (millis() - nvsDirtyMs > 2000)) {
+        nvsDirty = false;
+        saveStation();
+    }
 }
 
 static void loadStation() {
@@ -236,8 +256,8 @@ static void drawFrame() {
     // ── Right panel: Volume ──
     int gy = ry + 60;
     int vy = gy + 42;
-    canvas.fillRect(RPANEL_X, vy, RPANEL_W, 44, cPanel);
-    canvas.drawRect(RPANEL_X, vy, RPANEL_W, 44, cBorder);
+    canvas.fillRect(RPANEL_X, vy, RPANEL_W, 52, cPanel);
+    canvas.drawRect(RPANEL_X, vy, RPANEL_W, 52, cBorder);
 
     canvas.setTextColor(cDim, cPanel);
     {
@@ -248,7 +268,7 @@ static void drawFrame() {
 
     int barW = RPANEL_W - 16;
     int barX = RPANEL_X + 8;
-    int barY = vy + 16;
+    int barY = vy + 18;
     canvas.fillRoundRect(barX, barY, barW, 4, 2, cBarBg);
     int fillW = (vol * barW) / MAX_VOLUME;
     canvas.fillRoundRect(barX, barY, fillW, 4, 2, gradientColor565((float)vol / MAX_VOLUME));
@@ -262,18 +282,18 @@ static void drawFrame() {
     uint16_t minusCol = (hlActive && touchHighlight == 0) ? TFT_WHITE : cBtnCol;
     uint16_t muteCol  = (hlActive && touchHighlight == 1) ? TFT_WHITE : (muted ? TFT_RED : cBtnCol);
     uint16_t plusCol   = (hlActive && touchHighlight == 2) ? TFT_WHITE : cBtnCol;
-    canvas.fillRoundRect(RPANEL_X + 4,  vy + 26, 33, 15, 3, minusCol);
-    canvas.fillRoundRect(RPANEL_X + 41, vy + 26, 33, 15, 3, muteCol);
-    canvas.fillRoundRect(RPANEL_X + 78, vy + 26, 33, 15, 3, plusCol);
+    canvas.fillRoundRect(RPANEL_X + 4,  vy + 34, 33, 15, 3, minusCol);
+    canvas.fillRoundRect(RPANEL_X + 41, vy + 34, 33, 15, 3, muteCol);
+    canvas.fillRoundRect(RPANEL_X + 78, vy + 34, 33, 15, 3, plusCol);
     canvas.setTextColor(cBright, minusCol);
-    canvas.drawCenterString("-",    RPANEL_X + 20,  vy + 30, 1);
+    canvas.drawCenterString("-",    RPANEL_X + 20,  vy + 38, 1);
     canvas.setTextColor(cBright, muteCol);
-    canvas.drawCenterString("MUTE", RPANEL_X + 57,  vy + 30, 1);
+    canvas.drawCenterString("MUTE", RPANEL_X + 57,  vy + 38, 1);
     canvas.setTextColor(cBright, plusCol);
-    canvas.drawCenterString("+",    RPANEL_X + 94,  vy + 30, 1);
+    canvas.drawCenterString("+",    RPANEL_X + 94,  vy + 38, 1);
 
     // ── Right panel: Bitrate ──
-    int by = vy + 48;
+    int by = vy + 56;
     canvas.fillRect(RPANEL_X, by, RPANEL_W, 16, cPanel);
     canvas.drawRect(RPANEL_X, by, RPANEL_W, 16, cBorder);
     canvas.setTextColor(TFT_GREEN, cPanel);
@@ -377,7 +397,14 @@ static void handleTouch() {
     if (now - lastTouchMs < 300) return;
     lastTouchMs = now;
 
-    int tx = tp.x, ty = tp.y;
+    int tx = tp.x, ty = tp.y + 12;  // GT911 Y offset compensation
+
+    // DEBUG: draw touch point directly on display
+    if (tx >= 0 && tx < 320 && ty >= 0 && ty < 240) {
+        tft.drawCircle(tx, ty, 8, lgfx::color565(180, 180, 180));
+        tft.drawCircle(tx, ty, 9, lgfx::color565(180, 180, 180));
+    }
+    Serial.printf("Touch: x=%d y=%d (raw_y=%d)\n", tx, ty, tp.y);
 
     // Station selection — left panel
     if (tx < LPANEL_W && ty > STA_Y && ty < STA_Y + NUM_STATIONS * STA_LINE + 10) {
@@ -386,18 +413,18 @@ static void handleTouch() {
             currentStation = idx;
             strlcpy(songTitle, "Connecting...", sizeof(songTitle));
             id3Artist[0] = '\0'; id3Title[0] = '\0'; bitrate = 0;
-            audio.connecttohost(stationUrls[currentStation]);
+            pendingConnect = true;
             Serial.printf("Station: %s\n", stationNames[currentStation]);
             saveStation();
         }
     }
 
-    // Volume slider — right panel (vy=122, bar drawn at vy+16)
-    // Touch zone: vy+4 to vy+20 (centered on bar, avoids button area)
+    // Volume slider — right panel (vy=122, bar drawn at vy+18)
+    // Touch zone: vy+10 to vy+26 (centered on bar/knob area)
     int vy = HDR_H + 4 + 60 + 42;  // 122
     int barX = RPANEL_X + 4;
     int barW = RPANEL_W - 8;
-    if (tx >= RPANEL_X && tx <= RPANEL_X + RPANEL_W && ty >= vy + 4 && ty <= vy + 20) {
+    if (tx >= RPANEL_X && tx <= RPANEL_X + RPANEL_W && ty >= vy + 10 && ty <= vy + 26) {
         int clampedX = tx;
         if (clampedX < barX) clampedX = barX;
         if (clampedX > barX + barW) clampedX = barX + barW;
@@ -406,30 +433,30 @@ static void handleTouch() {
         if (newVol > MAX_VOLUME) newVol = MAX_VOLUME;
         vol = newVol;
         audio.setVolume(vol);
-        saveStation();
+        markDirty();
         touchHighlight = 3; touchHlMs = millis();
     }
 
-    // Volume buttons: [ - ] [ MUTE ] [ + ] drawn at vy+26
-    // Touch zone: vy+20 to vy+48 (generous below)
-    if (tx > RPANEL_X && ty >= vy + 20 && ty <= vy + 48) {
+    // Volume buttons: [ - ] [ MUTE ] [ + ] drawn at vy+34
+    // Touch zone: vy+30 to vy+54 (4px dead zone above, generous below)
+    if (tx > RPANEL_X && ty >= vy + 30 && ty <= vy + 54) {
         if (tx < RPANEL_X + 37 && vol > 0) {
             vol--;
             audio.setVolume(vol);
-            saveStation();
+            markDirty();
             touchHighlight = 0; touchHlMs = millis();
         }
         else if (tx >= RPANEL_X + 38 && tx < RPANEL_X + 76) {
             if (vol > 0) { savedVol = vol; vol = 0; }
             else         { vol = savedVol; }
             audio.setVolume(vol);
-            saveStation();
+            markDirty();
             touchHighlight = 1; touchHlMs = millis();
         }
         else if (tx >= RPANEL_X + 76 && vol < MAX_VOLUME) {
             vol++;
             audio.setVolume(vol);
-            saveStation();
+            markDirty();
             touchHighlight = 2; touchHlMs = millis();
         }
     }
@@ -446,7 +473,7 @@ static void handleButtons() {
         currentStation = (currentStation + 1) % NUM_STATIONS;
         strlcpy(songTitle, "Connecting...", sizeof(songTitle));
         id3Artist[0] = '\0'; id3Title[0] = '\0'; bitrate = 0;
-        audio.connecttohost(stationUrls[currentStation]);
+        pendingConnect = true;
         saveStation();
     }
     prevBoot = boot;
@@ -459,7 +486,7 @@ static void handleButtons() {
         if (vol > 0) { savedVol = vol; vol = 0; }
         else         { vol = savedVol; }
         audio.setVolume(vol);
-        saveStation();
+        markDirty();
     }
     prevMute = mute;
 }
@@ -575,6 +602,10 @@ void setup() {
 
 static void audioTask(void *param) {
     for (;;) {
+        if (pendingConnect) {
+            pendingConnect = false;
+            audio.connecttohost(stationUrls[currentStation]);
+        }
         audio.loop();
         vTaskDelay(1);
     }
@@ -602,7 +633,7 @@ void loop() {
             if (!wasConnected) {
                 strlcpy(ipAddress, WiFi.localIP().toString().c_str(), sizeof(ipAddress));
                 Serial.println("WiFi reconnected, resuming stream");
-                audio.connecttohost(stationUrls[currentStation]);
+                pendingConnect = true;
                 strlcpy(songTitle, "Reconnecting...", sizeof(songTitle));
             }
         } else {
@@ -616,6 +647,7 @@ void loop() {
 
     handleTouch();
     handleButtons();
+    flushIfDirty();
 
     // Clear touch highlight after 200ms
     if (touchHighlight >= 0 && now - touchHlMs >= 200) {
