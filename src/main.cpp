@@ -15,6 +15,7 @@
 #include "config.h"
 #include "pins.h"
 #include "es8311.h"
+#include "spectrum.h"
 
 // ─── Globals ──────────────────────────────────────────────
 
@@ -82,9 +83,9 @@ static unsigned long lastVisMs     = 0;
 static int       touchHighlight   = -1;
 static unsigned long touchHlMs    = 0;
 
-// Visualiser bars
-static int graphBars[12] = {0};
-static uint16_t barColors[6];  // pre-computed gradient
+// Visualiser display state
+static float    displayBars[VIZ_BANDS]  = {0};    // smoothed bars for rendering
+static uint16_t barColors[6];            // pre-computed gradient
 
 // UI layout constants
 static constexpr int LPANEL_W   = 198;
@@ -273,18 +274,36 @@ static void drawFrame() {
 // ─── Visualizer (pushed directly to display at its own cadence) ──
 
 static void drawVisualizer() {
+    // Smooth decay: read spectrum bands and ease toward target
+    for (int i = 0; i < VIZ_BANDS; i++) {
+        float target = specBands[i];
+        // log10 scaling: subtract 2.0 so that ~100 maps to 0, ~500K maps to ~3.7
+        // Then scale by 1.3 to spread across 0-5 range
+        target = (target > 100.0f) ? (log10f(target) - 2.0f) * 1.3f : 0.0f;
+        if (target > 5.0f) target = 5.0f;
+        if (target < 0.0f) target = 0.0f;
+        // Fast attack, slow decay
+        if (target > displayBars[i])
+            displayBars[i] += (target - displayBars[i]) * 0.6f;
+        else
+            displayBars[i] += (target - displayBars[i]) * 0.15f;
+    }
+
     vizSprite.fillSprite(cPanel);
     vizSprite.drawRect(0, 0, VIZ_W, VIZ_H, cBorder);
 
     if (wifiConnected) {
-        int barW = 6, gap = 2;
-        int totalW = 12 * barW + 11 * gap;
+        int barW = 5, gap = 2;
+        int totalW = VIZ_BANDS * barW + (VIZ_BANDS - 1) * gap;
         int startX = (VIZ_W - totalW) / 2;
-        for (int i = 0; i < 12; i++) {
-            int bh = graphBars[i] * 5 + 2;
+        for (int i = 0; i < VIZ_BANDS; i++) {
+            int level = (int)(displayBars[i] + 0.5f);
+            if (level < 0) level = 0;
+            if (level > 5) level = 5;
+            int bh = level * 5 + 2;
             int bx = startX + i * (barW + gap);
             int by = VIZ_H - 3 - bh;
-            vizSprite.fillRect(bx, by, barW, bh, barColors[graphBars[i] < 6 ? graphBars[i] : 5]);
+            vizSprite.fillRect(bx, by, barW, bh, barColors[level]);
         }
     }
 
@@ -508,6 +527,9 @@ void setup() {
     audio.setVolume(vol);
     audio.setConnectionTimeout(5000, 0);
 
+    // FFT init
+    spectrumInit();
+
     if (wifiConnected) {
         strlcpy(songTitle, "Connecting...", sizeof(songTitle));
         Serial.printf("Connecting to: %s\n", stationUrls[currentStation]);
@@ -519,7 +541,7 @@ void setup() {
     }
 
     // Start audio on Core 0 (WiFi core) — rendering stays on Core 1
-    xTaskCreatePinnedToCore(audioTask, "audio", 8192, NULL, 2, NULL, 0);
+    xTaskCreatePinnedToCore(audioTask, "audio", 12288, NULL, 2, NULL, 0);
 
     drawFrame();
     drawVisualizer();
@@ -539,12 +561,9 @@ static void audioTask(void *param) {
 void loop() {
     unsigned long now = millis();
 
-    // Animate visualiser bars and push vizSprite directly
-    if (now - lastVisMs > 200) {
+    // Update visualiser at ~50fps (20ms) — smooth decay driven by real spectrum data
+    if (now - lastVisMs > 20) {
         lastVisMs = now;
-        if (wifiConnected) {
-            for (int i = 0; i < 12; i++) graphBars[i] = random(1, 6);
-        }
         drawVisualizer();
     }
 
