@@ -68,6 +68,10 @@ static unsigned long lastStatusMs  = 0;
 static unsigned long lastTouchMs   = 0;
 static unsigned long lastVisMs     = 0;
 
+// Touch highlight feedback (-1=none, 0=minus, 1=mute, 2=plus, 3=slider)
+static int       touchHighlight   = -1;
+static unsigned long touchHlMs    = 0;
+
 // Visualiser bars
 static int graphBars[12] = {0};
 static uint16_t barColors[6];  // pre-computed gradient
@@ -147,7 +151,7 @@ static void drawFrame() {
     canvas.drawRect(2, HDR_H + 4, LPANEL_W - 4, NUM_STATIONS * STA_LINE + 8, cBorder);
     canvas.fillRect(4, HDR_H + 1, LPANEL_W - 8, 2, cAccent);
 
-    // Header labels — centered within their panel like Winamp2
+    // Header labels — centered within their panel
     canvas.setTextColor(cBright, cBg);
     canvas.drawCenterString("STATIONS", 2 + (LPANEL_W - 4) / 2, 2, 2);
     canvas.drawCenterString("INTERNET RADIO", RPANEL_X + RPANEL_W / 2, 2, 2);
@@ -204,7 +208,11 @@ static void drawFrame() {
     canvas.drawRect(RPANEL_X, vy, RPANEL_W, 44, cBorder);
 
     canvas.setTextColor(cDim, cPanel);
-    canvas.drawCenterString("VOLUME", RPANEL_X + RPANEL_W / 2, vy + 3, 1);
+    {
+        char volLabel[16];
+        snprintf(volLabel, sizeof(volLabel), "VOLUME %d", vol);
+        canvas.drawCenterString(volLabel, RPANEL_X + RPANEL_W / 2, vy + 3, 1);
+    }
 
     int barW = RPANEL_W - 16;
     int barX = RPANEL_X + 8;
@@ -218,15 +226,18 @@ static void drawFrame() {
 
     // Volume buttons: [ - ] [ MUTE ] [ + ]
     bool muted = (vol == 0);
-    uint16_t muteCol = muted ? TFT_RED : cBtnCol;
-    canvas.fillRoundRect(RPANEL_X + 4,  vy + 26, 33, 15, 3, cBtnCol);
+    bool hlActive = (touchHighlight >= 0 && (millis() - touchHlMs < 200));
+    uint16_t minusCol = (hlActive && touchHighlight == 0) ? TFT_WHITE : cBtnCol;
+    uint16_t muteCol  = (hlActive && touchHighlight == 1) ? TFT_WHITE : (muted ? TFT_RED : cBtnCol);
+    uint16_t plusCol   = (hlActive && touchHighlight == 2) ? TFT_WHITE : cBtnCol;
+    canvas.fillRoundRect(RPANEL_X + 4,  vy + 26, 33, 15, 3, minusCol);
     canvas.fillRoundRect(RPANEL_X + 41, vy + 26, 33, 15, 3, muteCol);
-    canvas.fillRoundRect(RPANEL_X + 78, vy + 26, 33, 15, 3, cBtnCol);
-    canvas.setTextColor(cBright, cBtnCol);
+    canvas.fillRoundRect(RPANEL_X + 78, vy + 26, 33, 15, 3, plusCol);
+    canvas.setTextColor(cBright, minusCol);
     canvas.drawCenterString("-",    RPANEL_X + 20,  vy + 30, 1);
     canvas.setTextColor(cBright, muteCol);
     canvas.drawCenterString("MUTE", RPANEL_X + 57,  vy + 30, 1);
-    canvas.setTextColor(cBright, cBtnCol);
+    canvas.setTextColor(cBright, plusCol);
     canvas.drawCenterString("+",    RPANEL_X + 94,  vy + 30, 1);
 
     // ── Right panel: Bitrate ──
@@ -248,8 +259,16 @@ static void drawFrame() {
     int tickerBoxH = 240 - tickerBoxY;
     canvas.fillRect(2, tickerBoxY, 316, tickerBoxH, cPanel);
     canvas.drawRect(2, tickerBoxY, 316, tickerBoxH, cBorder);
+
+    // Snapshot song title to avoid cross-core race flicker
+    char titleSnap[128];
+    strlcpy(titleSnap, songTitle, sizeof(titleSnap));
+    int scrollSnap = songScrollX;
+
+    canvas.setClipRect(4, tickerBoxY + 1, 312, tickerBoxH - 2);
     canvas.setTextColor(cBright, cPanel);
-    canvas.drawString(songTitle, songScrollX + 4, TICKER_Y, 2);
+    canvas.drawString(titleSnap, scrollSnap + 4, TICKER_Y, 2);
+    canvas.clearClipRect();
 
     // Outer frame
     canvas.drawRect(0, 0, 320, 240, cBorder);
@@ -285,24 +304,45 @@ static void handleTouch() {
         }
     }
 
-    // Volume/Mute buttons — right panel
-    int volPanelY = HDR_H + 4 + 60 + 42;  // vy
-    if (tx > RPANEL_X && ty >= volPanelY + 12 && ty <= volPanelY + 52) {
+    // Volume slider — right panel (vy=122, bar drawn at vy+16)
+    // Touch zone: vy+4 to vy+20 (centered on bar, avoids button area)
+    int vy = HDR_H + 4 + 60 + 42;  // 122
+    int barX = RPANEL_X + 4;
+    int barW = RPANEL_W - 8;
+    if (tx >= RPANEL_X && tx <= RPANEL_X + RPANEL_W && ty >= vy + 4 && ty <= vy + 20) {
+        int clampedX = tx;
+        if (clampedX < barX) clampedX = barX;
+        if (clampedX > barX + barW) clampedX = barX + barW;
+        int newVol = ((clampedX - barX) * MAX_VOLUME + barW / 2) / barW;
+        if (newVol < 0) newVol = 0;
+        if (newVol > MAX_VOLUME) newVol = MAX_VOLUME;
+        vol = newVol;
+        audio.setVolume(vol);
+        saveStation();
+        touchHighlight = 3; touchHlMs = millis();
+    }
+
+    // Volume buttons: [ - ] [ MUTE ] [ + ] drawn at vy+26
+    // Touch zone: vy+20 to vy+48 (generous below)
+    if (tx > RPANEL_X && ty >= vy + 20 && ty <= vy + 48) {
         if (tx < RPANEL_X + 37 && vol > 0) {
             vol--;
             audio.setVolume(vol);
             saveStation();
+            touchHighlight = 0; touchHlMs = millis();
         }
         else if (tx >= RPANEL_X + 38 && tx < RPANEL_X + 76) {
             if (vol > 0) { savedVol = vol; vol = 0; }
             else         { vol = savedVol; }
             audio.setVolume(vol);
             saveStation();
+            touchHighlight = 1; touchHlMs = millis();
         }
         else if (tx >= RPANEL_X + 76 && vol < MAX_VOLUME) {
             vol++;
             audio.setVolume(vol);
             saveStation();
+            touchHighlight = 2; touchHlMs = millis();
         }
     }
 }
@@ -480,7 +520,10 @@ void loop() {
     if (now - lastFrameMs > 66) {
         lastFrameMs = now;
         songScrollX -= 2;
-        int tw = strlen(songTitle) * 7;
+        // Snapshot title length for scroll wrap (avoid cross-core race)
+        char titleBuf[128];
+        strlcpy(titleBuf, songTitle, sizeof(titleBuf));
+        int tw = strlen(titleBuf) * 7;
         if (songScrollX < -tw) songScrollX = 310;
         drawFrame();
     }
