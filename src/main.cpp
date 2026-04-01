@@ -83,12 +83,31 @@ static unsigned long lastVisMs     = 0;
 static int       touchHighlight   = -1;
 static unsigned long touchHlMs    = 0;
 
+// Winamp 2 gradient: 6 key colors from base (dark blue-green) to peak (red)
+static const uint8_t gradR[] = {0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF};
+static const uint8_t gradG[] = {0x40, 0x80, 0xFF, 0xFF, 0x80, 0x00};
+static const uint8_t gradB[] = {0x40, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+// Interpolate the Winamp 2 gradient at position t (0.0 = base, 1.0 = peak)
+static uint16_t gradientColor565(float t) {
+    if (t <= 0.0f) t = 0.0f;
+    if (t >= 1.0f) t = 1.0f;
+    float pos = t * 5.0f;
+    int idx = (int)pos;
+    if (idx > 4) idx = 4;
+    float f = pos - idx;
+    uint8_t r = gradR[idx] + (gradR[idx + 1] - gradR[idx]) * f;
+    uint8_t g = gradG[idx] + (gradG[idx + 1] - gradG[idx]) * f;
+    uint8_t b = gradB[idx] + (gradB[idx + 1] - gradB[idx]) * f;
+    return lgfx::color565(r, g, b);
+}
+
 // Visualiser display state
 static float    displayBars[VIZ_BANDS]  = {0};    // smoothed bars for rendering
 static constexpr int MAX_SEGS = 10;               // segments per bar
 static constexpr int SEG_H    = 2;                // segment pixel height
 static constexpr int SEG_GAP  = 1;                // gap between segments
-static uint16_t segColors[MAX_SEGS];              // interpolated Winamp 2 gradient
+static uint16_t segColors[MAX_SEGS];              // pre-computed gradient for spectrum
 
 // UI layout constants
 static constexpr int LPANEL_W   = 198;
@@ -222,8 +241,8 @@ static void drawFrame() {
 
     canvas.setTextColor(cDim, cPanel);
     {
-        char volLabel[16];
-        snprintf(volLabel, sizeof(volLabel), "VOLUME %d", vol);
+        char volLabel[20];
+        snprintf(volLabel, sizeof(volLabel), "VOLUME: %d%%", (vol * 100 + MAX_VOLUME / 2) / MAX_VOLUME);
         canvas.drawCenterString(volLabel, RPANEL_X + RPANEL_W / 2, vy + 3, 1);
     }
 
@@ -232,7 +251,7 @@ static void drawFrame() {
     int barY = vy + 16;
     canvas.fillRoundRect(barX, barY, barW, 4, 2, cBarBg);
     int fillW = (vol * barW) / MAX_VOLUME;
-    canvas.fillRoundRect(barX, barY, fillW, 4, 2, TFT_YELLOW);
+    canvas.fillRoundRect(barX, barY, fillW, 4, 2, gradientColor565((float)vol / MAX_VOLUME));
     int knobX = barX + fillW - 4;
     if (knobX < barX) knobX = barX;
     canvas.fillRoundRect(knobX, barY - 4, 8, 12, 3, cBright);
@@ -495,20 +514,8 @@ void setup() {
     cStationDim= canvas.color565(0, 140, 0);
     cBarBg     = canvas.color565(60, 60, 60);
     cBtnCol    = canvas.color565(80, 80, 100);
-    // Winamp 2 spectrum gradient: interpolate 6 key colors across MAX_SEGS segments
-    static const uint8_t refR[] = {0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF};
-    static const uint8_t refG[] = {0x40, 0x80, 0xFF, 0xFF, 0x80, 0x00};
-    static const uint8_t refB[] = {0x40, 0x00, 0x00, 0x00, 0x00, 0x00};
-    for (int s = 0; s < MAX_SEGS; s++) {
-        float t = s * 5.0f / (MAX_SEGS - 1);   // map segment to 0..5
-        int idx = (int)t;
-        if (idx > 4) idx = 4;
-        float f = t - idx;
-        uint8_t r = refR[idx] + (refR[idx + 1] - refR[idx]) * f;
-        uint8_t g = refG[idx] + (refG[idx + 1] - refG[idx]) * f;
-        uint8_t b = refB[idx] + (refB[idx + 1] - refB[idx]) * f;
-        segColors[s] = canvas.color565(r, g, b);
-    }
+    for (int s = 0; s < MAX_SEGS; s++)
+        segColors[s] = gradientColor565((float)s / (MAX_SEGS - 1));
 
     tft.setTextColor(TFT_GREEN, TFT_BLACK);
     tft.setTextSize(2);
