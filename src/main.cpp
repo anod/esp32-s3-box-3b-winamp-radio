@@ -20,6 +20,8 @@
 
 static LGFX       tft;
 static LGFX_Sprite canvas(&tft);
+static LGFX_Sprite tickerSprite(&tft);  // pushed directly to display (not via canvas)
+static LGFX_Sprite vizSprite(&tft);     // visualizer pushed directly to display
 static Audio       audio;
 static Preferences prefs;
 
@@ -57,10 +59,18 @@ static char            songTitle[128]  = "";
 static volatile long   bitrate         = 0;
 static volatile bool   wifiConnected   = false;
 static volatile int    wifiRssi        = 0;
-static int             songScrollX     = 320;
 static char            id3Artist[64]   = "";
 static char            id3Title[64]    = "";
 static char            ipAddress[20]   = "";
+
+// Ticker sprite dimensions
+static constexpr int TICKER_SPRITE_W = 316;
+static constexpr int TICKER_SPRITE_H = 22;
+
+// Ticker scroll state
+static char   tickerPrevTitle[128] = "";
+static int    tickerCursorX        = TICKER_SPRITE_W;
+static bool   needsFullRedraw      = true;  // push full canvas when static UI changes
 
 // Timing
 static unsigned long lastFrameMs   = 0;
@@ -85,8 +95,15 @@ static constexpr int STA_Y      = 20;
 static constexpr int STA_LINE   = 18;
 static constexpr int TICKER_Y   = 220;
 static constexpr int TICKER_H   = 18;
-static constexpr int TICKER_REGION_Y = 210;   // top of ticker region (below station box at 208)
-static constexpr int TICKER_REGION_H = 40;    // full height to bottom of screen
+static constexpr int TICKER_REGION_Y = 210;   // "NOW PLAYING" label Y
+static constexpr int TICKER_BOX_Y   = 218;   // top of ticker box (canvas stops here)
+static constexpr int CANVAS_H       = 218;   // canvas height (above ticker box)
+
+// Visualizer sprite position and size (drawn directly to display)
+static constexpr int VIZ_X = RPANEL_X;
+static constexpr int VIZ_Y = HDR_H + 4 + 60;  // ry + 60
+static constexpr int VIZ_W = RPANEL_W;
+static constexpr int VIZ_H = 38;
 
 // Theme colours (computed once in setup)
 static uint16_t cBg, cPanel, cBorder, cAccent, cDim, cBright;
@@ -104,6 +121,7 @@ static void saveStation() {
     prefs.putInt("station", currentStation);
     prefs.putInt("volume", vol);
     prefs.end();
+    needsFullRedraw = true;
 }
 
 static void loadStation() {
@@ -192,17 +210,8 @@ static void drawFrame() {
         canvas.drawString(ipAddress, RPANEL_X + 6, ry + 42, 1);
     }
 
-    // ── Right panel: Visualiser ──
-    int gy = ry + 60;
-    canvas.fillRect(RPANEL_X, gy, RPANEL_W, 38, cPanel);
-    canvas.drawRect(RPANEL_X, gy, RPANEL_W, 38, cBorder);
-    for (int i = 0; i < 12; i++) {
-        for (int j = 0; j < graphBars[i]; j++) {
-            canvas.fillRect(RPANEL_X + 6 + i * 9, gy + 30 - j * 6, 7, 5, barColors[j]);
-        }
-    }
-
     // ── Right panel: Volume ──
+    int gy = ry + 60;
     int vy = gy + 42;
     canvas.fillRect(RPANEL_X, vy, RPANEL_W, 44, cPanel);
     canvas.drawRect(RPANEL_X, vy, RPANEL_W, 44, cBorder);
@@ -251,29 +260,66 @@ static void drawFrame() {
         canvas.drawString(buf, RPANEL_X + 6, by + 4, 1);
     }
 
-    // ── Song title area ──
+    // ── "NOW PLAYING" label (inside canvas, above ticker box) ──
     canvas.setTextColor(cDim, cBg);
     canvas.drawString("NOW PLAYING", 6, TICKER_REGION_Y, 1);
 
-    int tickerBoxY = TICKER_Y - 2;
-    int tickerBoxH = 240 - tickerBoxY;
-    canvas.fillRect(2, tickerBoxY, 316, tickerBoxH, cPanel);
-    canvas.drawRect(2, tickerBoxY, 316, tickerBoxH, cBorder);
-
-    // Snapshot song title to avoid cross-core race flicker
-    char titleSnap[128];
-    strlcpy(titleSnap, songTitle, sizeof(titleSnap));
-    int scrollSnap = songScrollX;
-
-    canvas.setClipRect(4, tickerBoxY + 1, 312, tickerBoxH - 2);
-    canvas.setTextColor(cBright, cPanel);
-    canvas.drawString(titleSnap, scrollSnap + 4, TICKER_Y, 2);
-    canvas.clearClipRect();
-
-    // Outer frame
-    canvas.drawRect(0, 0, 320, 240, cBorder);
+    // Outer frame (canvas height only, bottom border at y=217)
+    canvas.drawRect(0, 0, 320, CANVAS_H, cBorder);
 
     canvas.pushSprite(0, 0);
+}
+
+// ─── Visualizer (pushed directly to display at its own cadence) ──
+
+static void drawVisualizer() {
+    vizSprite.fillSprite(cPanel);
+    vizSprite.drawRect(0, 0, VIZ_W, VIZ_H, cBorder);
+
+    if (wifiConnected) {
+        int barW = 6, gap = 2;
+        int totalW = 12 * barW + 11 * gap;
+        int startX = (VIZ_W - totalW) / 2;
+        for (int i = 0; i < 12; i++) {
+            int bh = graphBars[i] * 5 + 2;
+            int bx = startX + i * (barW + gap);
+            int by = VIZ_H - 3 - bh;
+            vizSprite.fillRect(bx, by, barW, bh, barColors[graphBars[i] < 6 ? graphBars[i] : 5]);
+        }
+    }
+
+    vizSprite.pushSprite(VIZ_X, VIZ_Y);
+}
+
+// ─── Ticker scroll (using sprite.scroll(), pushed directly to display) ──
+
+
+static void scrollTicker() {
+    static int textW = 0;
+
+    // Snapshot to avoid cross-core race with audioCallback on Core 0
+    char titleSnap[128];
+    strlcpy(titleSnap, songTitle, sizeof(titleSnap));
+
+    // Detect title change — restart from right edge
+    if (strcmp(tickerPrevTitle, titleSnap) != 0) {
+        strlcpy(tickerPrevTitle, titleSnap, sizeof(tickerPrevTitle));
+        textW = tickerSprite.textWidth(titleSnap, &fonts::Font2);
+        tickerCursorX = TICKER_SPRITE_W;
+    }
+
+    tickerSprite.fillSprite(cPanel);
+    tickerSprite.drawRect(0, 0, TICKER_SPRITE_W, TICKER_SPRITE_H, cBorder);
+    tickerSprite.setTextColor(TFT_GREEN, cPanel);
+    tickerSprite.drawString(titleSnap, tickerCursorX, 3, 2);
+    tickerCursorX -= 1;
+
+    // When text fully scrolled off left, restart from right
+    if (tickerCursorX < -textW) {
+        tickerCursorX = TICKER_SPRITE_W;
+    }
+
+    tickerSprite.pushSprite(2, TICKER_BOX_Y);
 }
 
 // ─── Input handling ───────────────────────────────────────
@@ -297,7 +343,6 @@ static void handleTouch() {
             currentStation = idx;
             strlcpy(songTitle, "Connecting...", sizeof(songTitle));
             id3Artist[0] = '\0'; id3Title[0] = '\0'; bitrate = 0;
-            songScrollX = 10;
             audio.connecttohost(stationUrls[currentStation]);
             Serial.printf("Station: %s\n", stationNames[currentStation]);
             saveStation();
@@ -358,7 +403,6 @@ static void handleButtons() {
         currentStation = (currentStation + 1) % NUM_STATIONS;
         strlcpy(songTitle, "Connecting...", sizeof(songTitle));
         id3Artist[0] = '\0'; id3Title[0] = '\0'; bitrate = 0;
-        songScrollX = 10;
         audio.connecttohost(stationUrls[currentStation]);
         saveStation();
     }
@@ -404,7 +448,18 @@ void setup() {
 
     canvas.setColorDepth(16);
     canvas.setPsram(true);
-    canvas.createSprite(320, 240);
+    canvas.createSprite(320, CANVAS_H);  // only above ticker box
+
+    // Ticker sprite: covers rows 218-239, pushed directly to display
+    tickerSprite.setColorDepth(16);
+    tickerSprite.setPsram(false);
+    tickerSprite.createSprite(TICKER_SPRITE_W, TICKER_SPRITE_H);
+    tickerSprite.setTextFont(2);
+
+    // Visualizer sprite: pushed directly to display
+    vizSprite.setColorDepth(16);
+    vizSprite.setPsram(false);
+    vizSprite.createSprite(VIZ_W, VIZ_H);
 
     cBg        = canvas.color565(50, 50, 60);
     cPanel     = TFT_BLACK;
@@ -467,6 +522,7 @@ void setup() {
     xTaskCreatePinnedToCore(audioTask, "audio", 8192, NULL, 2, NULL, 0);
 
     drawFrame();
+    drawVisualizer();
 }
 
 // ─── Audio task (Core 0) ──────────────────────────────────
@@ -483,17 +539,19 @@ static void audioTask(void *param) {
 void loop() {
     unsigned long now = millis();
 
-    // Animate visualiser bars
+    // Animate visualiser bars and push vizSprite directly
     if (now - lastVisMs > 200) {
         lastVisMs = now;
         if (wifiConnected) {
             for (int i = 0; i < 12; i++) graphBars[i] = random(1, 6);
         }
+        drawVisualizer();
     }
 
     // Periodic WiFi status update
     if (now - lastStatusMs > 2000) {
         lastStatusMs = now;
+        needsFullRedraw = true;
         bool wasConnected = wifiConnected;
         wifiConnected = (WiFi.status() == WL_CONNECTED);
         if (wifiConnected) {
@@ -516,16 +574,24 @@ void loop() {
     handleTouch();
     handleButtons();
 
-    // Render frame at ~15fps (66ms) — never starves audio (separate core)
-    if (now - lastFrameMs > 66) {
+    // Clear touch highlight after 200ms
+    if (touchHighlight >= 0 && now - touchHlMs >= 200) {
+        touchHighlight = -1;
+        needsFullRedraw = true;
+    }
+
+    // Render at ~60fps (16ms)
+    if (now - lastFrameMs > 16) {
         lastFrameMs = now;
-        songScrollX -= 2;
-        // Snapshot title length for scroll wrap (avoid cross-core race)
-        char titleBuf[128];
-        strlcpy(titleBuf, songTitle, sizeof(titleBuf));
-        int tw = strlen(titleBuf) * 7;
-        if (songScrollX < -tw) songScrollX = 310;
-        drawFrame();
+
+        // Full canvas push only when static UI changed
+        if (needsFullRedraw) {
+            needsFullRedraw = false;
+            drawFrame();
+        }
+
+        // Ticker scrolls every frame — small fast push directly to display
+        scrollTicker();
     }
 
     vTaskDelay(1);
@@ -546,7 +612,6 @@ static void updateId3SongTitle() {
     }
     if (strcmp(songTitle, newTitle) != 0) {
         strlcpy(songTitle, newTitle, sizeof(songTitle));
-        songScrollX = 310;
     }
 }
 
@@ -579,7 +644,6 @@ void audioCallback(Audio::msg_t msg) {
                 strcmp(songTitle, "Reconnecting...") == 0) {
                 if (strcmp(songTitle, msg.msg) != 0) {
                     strlcpy(songTitle, msg.msg, sizeof(songTitle));
-                    songScrollX = 310;
                 }
             }
             break;
@@ -587,7 +651,6 @@ void audioCallback(Audio::msg_t msg) {
             Serial.printf("title: %s\n", msg.msg);
             if (msg.msg && msg.msg[0] != '\0' && strcmp(songTitle, msg.msg) != 0) {
                 strlcpy(songTitle, msg.msg, sizeof(songTitle));
-                songScrollX = 310;
                 id3Artist[0] = '\0';
                 id3Title[0] = '\0';
             }
