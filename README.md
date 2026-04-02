@@ -7,6 +7,7 @@ Based on [VolosR/WaveshareRadioStream](https://github.com/VolosR/WaveshareRadioS
 ## Features
 
 - 10 pre-configured internet radio stations (electronic, trance, rock, metal, pop, news)
+- Winamp 2 inspired UI: beveled buttons, grooved title bar, signal bars, state indicators
 - Touch screen station selection & volume control
 - Hardware buttons: Boot (cycle brightness), Mute (GPIO 1), Home (stop/play)
 - Auto-dim screen when stopped, restore on play
@@ -72,7 +73,7 @@ In WSL, grant serial access once: `sudo usermod -aG dialout $USER` (re-login req
 | Touch station name | Switch to that station         |
 | Touch VOL −/+      | Decrease/increase volume       |
 | Touch MUTE         | Toggle mute                    |
-| Touch BT/SPK       | Toggle Bluetooth/local speaker |
+| Touch BT SPEAKER   | Toggle Bluetooth/local speaker (green indicator = active) |
 | Home button (red ●)| Stop/play toggle               |
 | Boot button (GPIO0)| Cycle screen brightness        |
 | Mute button (GPIO1)| Toggle mute                    |

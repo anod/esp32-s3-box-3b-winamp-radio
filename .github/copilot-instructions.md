@@ -19,6 +19,7 @@ PlatformIO Arduino firmware for the ESP32-S3-BOX-3 development board. Streams in
 - **Core 0**: Dedicated FreeRTOS audio task (`audioTask`) — calls `audio.loop()` continuously, consumes `pendingConnect`/`pendingPause`/`pendingStop` flags
 - **Core 1**: Main Arduino `loop()` — UI rendering (~15fps), touch/button input, WiFi status, MQTT polling
 - **Display**: Single 320×240 PSRAM-backed sprite, fully composed and pushed once per frame. No partial redraws or multiple sprites — this prevents flicker.
+- **UI style**: Winamp 2 inspired — beveled buttons with highlight/shadow borders, grooved accent lines in the title bar, and green/gray state indicators. See "UI Styling" section below.
 - **Audio callbacks** run on Core 0 and write to shared state (`songTitle`, `bitrate`, `playState`). The render loop on Core 1 reads these. Use `volatile` for simple types; char arrays are tolerated without mutex since brief inconsistency is acceptable for display.
 - **I2S bridge** (`src/i2s_bridge.cpp`): Overrides the `audio_process_i2s()` weak hook to siphon decoded PCM to I2S1 TX when `btMode` is enabled. Must be in a separate `.cpp` that does NOT include `Audio.h` — weak attribute taints any definition in the same translation unit.
 - **MQTT module** (`src/mqtt.cpp`): Owns broker connection, HA discovery, state publishing, and command parsing. Commands are queued via `mqttCmdPending` and consumed by `loop()` on Core 1, which sets pending flags for Core 0 audio actions.
@@ -31,6 +32,18 @@ Audio-library methods (`connecttohost`, `pauseResume`, `stopSong`) must only be 
 - `pendingPause` — triggers `audio.pauseResume()` for play/pause toggle
 - `pendingStop` — triggers `audio.stopSong()` for stop commands
 - Only `audio.setVolume()` is safe to call cross-core.
+
+### UI Styling (Winamp 2 Theme)
+
+The UI follows a Winamp 2 classic skin aesthetic with pixel-precise beveled elements:
+
+- **Title bar** (10px): Accent-colored "R" logo, grooved accent lines flanking faux-bold "ESP32 RADIO" title, three decorative window buttons (○ − ×). Content offset by `tm=4` (top) and `lm=6` (sides) for screen viewing angle.
+- **Buttons** (`drawWaBtn` lambda in `drawFrame()`): Silver face (`WA_BTN_FACE` 0xC618), 1px dark border (`WA_BORDER`), top-left white highlight (`WA_HIGHLIGHT`), bottom-right gray shadow (`WA_SHADOW`). Pressed state replaces bevels with inner shadow rect and shifts text +1,+1.
+- **State indicators**: 5×5 square in button top-left corner — green (`TFT_GREEN`) when active, gray (`WA_SHADOW`) when inactive. Used on MUTE and BT SPEAKER buttons.
+- **Volume knob**: Winamp beveled rectangle matching button palette (not rounded).
+- **WiFi signal**: 4 ascending bars (2/4/6/8px tall) next to WIFI label. RSSI thresholds: −50/−60/−70 dBm for 4/3/2/1 bars.
+- **Touch highlight**: `touchHighlight` index 0–4 (−, MUTE, +, slider, BT) with 200ms flash via `hlActive` flag.
+- **WA color constants** are `constexpr` (no `color565()` in draw loops): `WA_BTN_FACE`, `WA_HIGHLIGHT`, `WA_SHADOW`, `WA_BORDER`.
 
 ## Build System
 
@@ -118,3 +131,16 @@ When reviewing changes, always verify:
 - **Draw loop cost**: No `color565()` calls, `WiFi.localIP().toString()`, or heap-allocating functions inside render loops. Pre-compute in `setup()`.
 - **Overflow**: `millis()` arithmetic must use unsigned subtraction. Intermediate touch/volume math must stay within `int` range.
 - **I2S bridge**: `audio_process_i2s` must stay in its own `.cpp` without `Audio.h`. Never disable `continueI2S`.
+- **UI consistency**: New buttons must use the `drawWaBtn` lambda with the Winamp 2 palette (`WA_BTN_FACE`, `WA_HIGHLIGHT`, `WA_SHADOW`, `WA_BORDER`). Touch zones must match drawn button coordinates. Update `touchHighlight` comment when adding new indices.
+- **Documentation**: Update `README.md` and `.github/copilot-instructions.md` if changes affect features, controls, architecture, or the code review checklist itself.
+
+## Development Workflow
+
+Before completing any task, follow this checklist:
+
+1. **Build**: `pio run -e esp32-s3-box` — firmware compiles without errors
+2. **Test**: `pio test -e native` — all unit tests pass
+3. **Flash & verify**: `pio run -e esp32-s3-box -t upload --upload-port /dev/ttyACM0` — test on hardware
+4. **Code review**: Review the diff (`git diff`) for correctness, style, and the Code Review Checklist above
+5. **Update docs**: Update `README.md` and `.github/copilot-instructions.md` if the change affects features, controls, architecture, UI layout, or the review checklist
+6. **Commit**: Write a descriptive commit message summarizing all changes
