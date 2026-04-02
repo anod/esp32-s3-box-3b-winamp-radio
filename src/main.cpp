@@ -26,6 +26,8 @@ static LGFX_Sprite vizSprite(&tft);     // visualizer pushed directly to display
 static Audio       audio;
 static Preferences prefs;
 
+// Defined in i2s_bridge.cpp
+extern void initBridgeI2S();
 // Station list
 #define NUM_STATIONS 10
 static const char* stationUrls[NUM_STATIONS] = {
@@ -60,6 +62,7 @@ static char            songTitle[128]  = "";
 static volatile long   bitrate         = 0;
 static volatile bool   wifiConnected   = false;
 static volatile int    wifiRssi        = 0;
+volatile bool          btMode          = false;  // true = BT speaker, false = local
 static char            id3Artist[64]   = "";
 static char            id3Title[64]    = "";
 static char            ipAddress[20]   = "";
@@ -146,6 +149,7 @@ static void saveStation() {
     prefs.begin("radio", false);
     prefs.putInt("station", currentStation);
     prefs.putInt("volume", vol);
+    prefs.putBool("btMode", btMode);
     prefs.end();
     needsFullRedraw = true;
 }
@@ -171,10 +175,11 @@ static void loadStation() {
     prefs.begin("radio", true);
     currentStation = prefs.getInt("station", 0);
     vol = prefs.getInt("volume", DEFAULT_VOLUME);
+    btMode = prefs.getBool("btMode", false);
     prefs.end();
     if (currentStation < 0 || currentStation >= NUM_STATIONS) currentStation = 0;
     if (vol < 0 || vol > MAX_VOLUME) vol = DEFAULT_VOLUME;
-    Serial.printf("Restored station %d, volume %d\n", currentStation, vol);
+    Serial.printf("Restored station %d, volume %d, btMode %d\n", currentStation, vol, (int)btMode);
 }
 
 // ─── ES8311 codec init ───────────────────────────────────
@@ -302,6 +307,13 @@ static void drawFrame() {
         snprintf(buf, sizeof(buf), "BITRATE %ldk", bitrate);
         canvas.drawString(buf, RPANEL_X + 6, by + 4, 1);
     }
+
+    // ── Right panel: BT/Speaker toggle ──
+    int bty = by + 18;
+    uint16_t btCol = btMode ? TFT_BLUE : cBtnCol;
+    canvas.fillRoundRect(RPANEL_X + 4, bty, RPANEL_W - 8, 16, 3, btCol);
+    canvas.setTextColor(TFT_WHITE, btCol);
+    canvas.drawCenterString(btMode ? "BT SPEAKER" : "LOCAL SPKR", RPANEL_X + RPANEL_W / 2, bty + 4, 1);
 
     // ── "NOW PLAYING" label (inside canvas, above ticker box) ──
     canvas.setTextColor(cDim, cBg);
@@ -460,6 +472,16 @@ static void handleTouch() {
             touchHighlight = 2; touchHlMs = millis();
         }
     }
+
+    // BT/Speaker toggle — below bitrate (by = vy + 56, button at by + 18)
+    int by = vy + 56;
+    int bty = by + 18;
+    if (tx >= RPANEL_X && tx <= RPANEL_X + RPANEL_W && ty >= bty && ty <= bty + 16) {
+        btMode = !btMode;
+        digitalWrite(PA_PIN, btMode ? LOW : HIGH);
+        markDirty();
+        Serial.printf("Output: %s\n", btMode ? "BT Speaker" : "Local Speaker");
+    }
 }
 
 static bool prevBoot = false;
@@ -578,6 +600,9 @@ void setup() {
     audio.setVolume(vol);
     audio.setConnectionTimeout(5000, 0);
 
+    // I2S1 bridge to WROOM-32D A2DP bridge
+    initBridgeI2S();
+
     // FFT init
     spectrumInit();
 
@@ -586,7 +611,7 @@ void setup() {
         Serial.printf("Connecting to: %s\n", stationUrls[currentStation]);
         audio.connecttohost(stationUrls[currentStation]);
         delay(200);
-        digitalWrite(PA_PIN, HIGH);
+        if (!btMode) digitalWrite(PA_PIN, HIGH);  // only enable PA for local speaker
     } else {
         strlcpy(songTitle, "WiFi not connected", sizeof(songTitle));
     }

@@ -10,6 +10,11 @@
 #define I2S_LRCK    45
 #define I2S_DOUT    15
 
+// I2S1 Bridge output (to WROOM-32D A2DP bridge)
+#define I2S1_BCLK   10
+#define I2S1_LRCK   14
+#define I2S1_DOUT   11
+
 // I2C (shared bus: ES8311 codec + GT911 touch)
 #define I2C_SDA     8
 #define I2C_SCL     18
