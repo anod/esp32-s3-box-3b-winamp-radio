@@ -34,7 +34,9 @@ char          songTitle[128] = "Test Song - Test Artist";
 volatile long bitrate        = 128;
 volatile bool wifiConnected  = true;
 volatile int  wifiRssi       = -52;
-volatile bool btMode         = false;
+volatile bool    btMode         = false;
+volatile uint8_t brightness     = 160;
+volatile bool    screenOn       = true;
 char          id3Artist[64]  = "Test Artist";
 char          id3Title[64]   = "Test Song";
 char          ipAddress[20]  = "192.168.1.42";
@@ -87,7 +89,9 @@ int mqttBuildStateJson(char *buf, int bufSize) {
         "\"bitrate\":%ld,"
         "\"output\":\"%s\","
         "\"rssi\":%d,"
-        "\"ip\":\"%s\"}",
+        "\"ip\":\"%s\","
+        "\"brightness\":%d,"
+        "\"screen\":%s}",
         playStateStr(playState),
         volF,
         muted ? "true" : "false",
@@ -96,7 +100,9 @@ int mqttBuildStateJson(char *buf, int bufSize) {
         (long)bitrate,
         btMode ? "bt" : "local",
         (int)wifiRssi,
-        ipAddress);
+        ipAddress,
+        (int)brightness,
+        screenOn ? "true" : "false");
 }
 
 int mqttBuildDiscoveryJson(char *buf, int bufSize) {
@@ -132,7 +138,9 @@ int mqttBuildDiscoveryJson(char *buf, int bufSize) {
           "\"pause\":{\"p\":\"button\",\"name\":\"Pause\",\"uniq_id\":\"%s_pause\",\"cmd_t\":\"%s/cmd/pause\",\"ic\":\"mdi:pause\"},"
           "\"stop\":{\"p\":\"button\",\"name\":\"Stop\",\"uniq_id\":\"%s_stop\",\"cmd_t\":\"%s/cmd/stop\",\"ic\":\"mdi:stop\"},"
           "\"next\":{\"p\":\"button\",\"name\":\"Next\",\"uniq_id\":\"%s_next\",\"cmd_t\":\"%s/cmd/next\",\"ic\":\"mdi:skip-next\"},"
-          "\"prev\":{\"p\":\"button\",\"name\":\"Previous\",\"uniq_id\":\"%s_prev\",\"cmd_t\":\"%s/cmd/prev\",\"ic\":\"mdi:skip-previous\"}"
+          "\"prev\":{\"p\":\"button\",\"name\":\"Previous\",\"uniq_id\":\"%s_prev\",\"cmd_t\":\"%s/cmd/prev\",\"ic\":\"mdi:skip-previous\"},"
+          "\"brightness\":{\"p\":\"number\",\"name\":\"Brightness\",\"uniq_id\":\"%s_brightness\",\"cmd_t\":\"%s/cmd/brightness\",\"val_tpl\":\"{{ value_json.brightness }}\",\"min\":1,\"max\":255,\"step\":1,\"ic\":\"mdi:brightness-6\",\"ent_cat\":\"config\"},"
+          "\"screen\":{\"p\":\"switch\",\"name\":\"Screen\",\"uniq_id\":\"%s_screen\",\"cmd_t\":\"%s/cmd/screen\",\"val_tpl\":\"{{ 'ON' if value_json.screen else 'OFF' }}\",\"ic\":\"mdi:monitor\",\"ent_cat\":\"config\"}"
         "}"
         "}",
         MQTT_CLIENT_ID, MQTT_DEVICE_NAME,
@@ -144,6 +152,8 @@ int mqttBuildDiscoveryJson(char *buf, int bufSize) {
         MQTT_CLIENT_ID,
         MQTT_CLIENT_ID,
         MQTT_CLIENT_ID,
+        MQTT_CLIENT_ID, MQTT_TOPIC_PREFIX,
+        MQTT_CLIENT_ID, MQTT_TOPIC_PREFIX,
         MQTT_CLIENT_ID, MQTT_TOPIC_PREFIX,
         MQTT_CLIENT_ID, MQTT_TOPIC_PREFIX,
         MQTT_CLIENT_ID, MQTT_TOPIC_PREFIX,
@@ -238,6 +248,8 @@ void test_buildStateJson_basic() {
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"output\":\"local\""));
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"ip\":\"192.168.1.42\""));
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"is_volume_muted\":false"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"brightness\":160"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"screen\":true"));
 }
 
 void test_buildStateJson_muted() {
@@ -278,6 +290,24 @@ void test_buildStateJson_bt_output() {
     mqttBuildStateJson(buf, sizeof(buf));
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"output\":\"bt\""));
     btMode = origBt;
+}
+
+void test_buildStateJson_brightness() {
+    uint8_t origBrt = brightness;
+    brightness = 80;
+    char buf[512];
+    mqttBuildStateJson(buf, sizeof(buf));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"brightness\":80"));
+    brightness = origBrt;
+}
+
+void test_buildStateJson_screen_off() {
+    bool origScreen = screenOn;
+    screenOn = false;
+    char buf[512];
+    mqttBuildStateJson(buf, sizeof(buf));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"screen\":false"));
+    screenOn = origScreen;
 }
 
 // ─── Discovery JSON tests ─────────────────────────────────
@@ -331,6 +361,17 @@ void test_buildDiscoveryJson_components() {
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"p\":\"button\""));
 }
 
+void test_buildDiscoveryJson_brightnessAndScreen() {
+    char buf[2500];
+    mqttBuildDiscoveryJson(buf, sizeof(buf));
+
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"uniq_id\":\"esp32radio_brightness\""));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"uniq_id\":\"esp32radio_screen\""));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"min\":1,\"max\":255,\"step\":1"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"ic\":\"mdi:brightness-6\""));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"ic\":\"mdi:monitor\""));
+}
+
 // ─── Test runner ──────────────────────────────────────────
 
 int main(int argc, char **argv) {
@@ -364,12 +405,15 @@ int main(int argc, char **argv) {
     RUN_TEST(test_buildStateJson_empty_title);
     RUN_TEST(test_buildStateJson_paused);
     RUN_TEST(test_buildStateJson_bt_output);
+    RUN_TEST(test_buildStateJson_brightness);
+    RUN_TEST(test_buildStateJson_screen_off);
 
     // Discovery JSON
     RUN_TEST(test_buildDiscoveryJson_fitsBuffer);
     RUN_TEST(test_buildDiscoveryJson_requiredFields);
     RUN_TEST(test_buildDiscoveryJson_allStations);
     RUN_TEST(test_buildDiscoveryJson_components);
+    RUN_TEST(test_buildDiscoveryJson_brightnessAndScreen);
 
     return UNITY_END();
 }

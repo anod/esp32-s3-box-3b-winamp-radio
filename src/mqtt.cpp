@@ -35,6 +35,8 @@ static const char* T_CMD_PAUSE   = MQTT_TOPIC_PREFIX "/cmd/pause";
 static const char* T_CMD_STOP    = MQTT_TOPIC_PREFIX "/cmd/stop";
 static const char* T_CMD_NEXT    = MQTT_TOPIC_PREFIX "/cmd/next";
 static const char* T_CMD_PREV    = MQTT_TOPIC_PREFIX "/cmd/prev";
+static const char* T_CMD_BRIGHTNESS = MQTT_TOPIC_PREFIX "/cmd/brightness";
+static const char* T_CMD_SCREEN  = MQTT_TOPIC_PREFIX "/cmd/screen";
 static const char* T_DISCOVERY   = "homeassistant/device/" MQTT_CLIENT_ID "/config";
 
 // ─── Testable helpers ─────────────────────────────────────
@@ -79,7 +81,9 @@ int mqttBuildStateJson(char *buf, int bufSize) {
         "\"bitrate\":%ld,"
         "\"output\":\"%s\","
         "\"rssi\":%d,"
-        "\"ip\":\"%s\"}",
+        "\"ip\":\"%s\","
+        "\"brightness\":%d,"
+        "\"screen\":%s}",
         playStateStr(playState),
         volF,
         muted ? "true" : "false",
@@ -88,7 +92,9 @@ int mqttBuildStateJson(char *buf, int bufSize) {
         (long)bitrate,
         btMode ? "bt" : "local",
         (int)wifiRssi,
-        ipAddress);
+        ipAddress,
+        (int)brightness,
+        screenOn ? "true" : "false");
 }
 
 int mqttBuildDiscoveryJson(char *buf, int bufSize) {
@@ -223,6 +229,27 @@ int mqttBuildDiscoveryJson(char *buf, int bufSize) {
             "\"uniq_id\":\"%s_prev\","
             "\"cmd_t\":\"%s\","
             "\"ic\":\"mdi:skip-previous\""
+          "},"
+
+          "\"brightness\":{"
+            "\"p\":\"number\","
+            "\"name\":\"Brightness\","
+            "\"uniq_id\":\"%s_brightness\","
+            "\"cmd_t\":\"%s\","
+            "\"val_tpl\":\"{{ value_json.brightness }}\","
+            "\"min\":1,\"max\":255,\"step\":1,"
+            "\"ic\":\"mdi:brightness-6\","
+            "\"ent_cat\":\"config\""
+          "},"
+
+          "\"screen\":{"
+            "\"p\":\"switch\","
+            "\"name\":\"Screen\","
+            "\"uniq_id\":\"%s_screen\","
+            "\"cmd_t\":\"%s\","
+            "\"val_tpl\":\"{{ 'ON' if value_json.screen else 'OFF' }}\","
+            "\"ic\":\"mdi:monitor\","
+            "\"ent_cat\":\"config\""
           "}"
 
         "}"
@@ -252,7 +279,11 @@ int mqttBuildDiscoveryJson(char *buf, int bufSize) {
         // next button
         MQTT_CLIENT_ID, T_CMD_NEXT,
         // prev button
-        MQTT_CLIENT_ID, T_CMD_PREV);
+        MQTT_CLIENT_ID, T_CMD_PREV,
+        // brightness number
+        MQTT_CLIENT_ID, T_CMD_BRIGHTNESS,
+        // screen switch
+        MQTT_CLIENT_ID, T_CMD_SCREEN);
 }
 
 // ─── MQTT callback (runs on Core 1 in PubSubClient.loop()) ──
@@ -296,6 +327,15 @@ static void mqttCallback(char *topic, byte *payload, unsigned int length) {
         if (strcmp(msg, "play") == 0) cmd.type = MQTT_CMD_PLAY;
         else if (strcmp(msg, "pause") == 0) cmd.type = MQTT_CMD_PAUSE;
         else if (strcmp(msg, "stop") == 0) cmd.type = MQTT_CMD_STOP;
+    } else if (strcmp(topic, T_CMD_BRIGHTNESS) == 0) {
+        int brt = atoi(msg);
+        if (brt < 1) brt = 1;
+        if (brt > 255) brt = 255;
+        cmd.type = MQTT_CMD_BRIGHTNESS;
+        cmd.intVal = brt;
+    } else if (strcmp(topic, T_CMD_SCREEN) == 0) {
+        cmd.type = MQTT_CMD_SCREEN;
+        cmd.boolVal = (strcmp(msg, "ON") == 0 || strcmp(msg, "true") == 0);
     }
 
     if (cmd.type != MQTT_CMD_NONE) {
@@ -317,6 +357,8 @@ static void mqttSubscribe() {
     mqtt.subscribe(T_CMD_STOP);
     mqtt.subscribe(T_CMD_NEXT);
     mqtt.subscribe(T_CMD_PREV);
+    mqtt.subscribe(T_CMD_BRIGHTNESS);
+    mqtt.subscribe(T_CMD_SCREEN);
 }
 
 // ─── Publish HA discovery + availability ──────────────────

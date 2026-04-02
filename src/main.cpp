@@ -86,7 +86,9 @@ static bool   needsFullRedraw      = true;  // push full canvas when static UI c
 // Screen brightness
 static const uint8_t BRIGHTNESS_LEVELS[] = {20, 80, 160, 255};
 static const int     NUM_BRIGHTNESS      = 4;
-static int           brightnessIdx       = 2;   // default = 160
+static int           brightnessIdx       = 2;   // index for boot-button cycling
+volatile uint8_t     brightness          = 160;  // current level (1-255), shared with MQTT
+volatile bool        screenOn            = true;
 static const uint8_t DIM_BRIGHTNESS      = 10;  // when stopped
 static int           prevPlayState       = PS_STOPPED;
 
@@ -173,6 +175,7 @@ static void saveStation() {
     prefs.putInt("station", currentStation);
     prefs.putInt("volume", vol);
     prefs.putBool("btMode", btMode);
+    prefs.putUChar("brightness", brightness);
     prefs.end();
     needsFullRedraw = true;
 }
@@ -199,10 +202,19 @@ static void loadStation() {
     currentStation = prefs.getInt("station", 0);
     vol = prefs.getInt("volume", DEFAULT_VOLUME);
     btMode = prefs.getBool("btMode", false);
+    brightness = prefs.getUChar("brightness", 160);
     prefs.end();
     if (currentStation < 0 || currentStation >= NUM_STATIONS) currentStation = 0;
     if (vol < 0 || vol > MAX_VOLUME) vol = DEFAULT_VOLUME;
-    Serial.printf("Restored station %d, volume %d, btMode %d\n", currentStation, vol, (int)btMode);
+    if (brightness < 1) brightness = 160;
+    // Sync brightnessIdx to closest preset for boot-button cycling
+    for (int i = 0; i < NUM_BRIGHTNESS; i++) {
+        if (abs((int)BRIGHTNESS_LEVELS[i] - (int)brightness) <
+            abs((int)BRIGHTNESS_LEVELS[brightnessIdx] - (int)brightness))
+            brightnessIdx = i;
+    }
+    Serial.printf("Restored station %d, volume %d, btMode %d, brightness %d\n",
+                  currentStation, vol, (int)btMode, brightness);
 }
 
 // ─── ES8311 codec init ───────────────────────────────────
@@ -655,8 +667,12 @@ static void handleButtons() {
     bool boot = (digitalRead(BTN_BOOT) == LOW);
     if (boot && !prevBoot) {
         brightnessIdx = (brightnessIdx + 1) % NUM_BRIGHTNESS;
-        tft.setBrightness(BRIGHTNESS_LEVELS[brightnessIdx]);
-        Serial.printf("Brightness: %d\n", BRIGHTNESS_LEVELS[brightnessIdx]);
+        brightness = BRIGHTNESS_LEVELS[brightnessIdx];
+        screenOn = true;
+        tft.setBrightness(brightness);
+        Serial.printf("Brightness: %d\n", brightness);
+        markDirty();
+        mqttNotifyStateChange();
     }
     prevBoot = boot;
 
@@ -705,7 +721,7 @@ void setup() {
 
     // Display
     tft.init();
-    tft.setBrightness(BRIGHTNESS_LEVELS[brightnessIdx]);
+    tft.setBrightness(brightness);
     tft.fillScreen(TFT_BLACK);
 
     canvas.setColorDepth(16);
@@ -861,10 +877,12 @@ void loop() {
     // Auto-dim screen when stopped, restore when playing
     int ps = playState;  // snapshot volatile once to avoid TOCTOU
     if (ps != prevPlayState) {
-        if (ps == PS_STOPPED)
-            tft.setBrightness(DIM_BRIGHTNESS);
-        else if (prevPlayState == PS_STOPPED)
-            tft.setBrightness(BRIGHTNESS_LEVELS[brightnessIdx]);
+        if (screenOn) {
+            if (ps == PS_STOPPED)
+                tft.setBrightness(DIM_BRIGHTNESS);
+            else if (prevPlayState == PS_STOPPED)
+                tft.setBrightness(brightness);
+        }
         prevPlayState = ps;
     }
 
@@ -951,6 +969,18 @@ void loop() {
                     mqttNotifyStateChange();
                     needsFullRedraw = true;
                 }
+                break;
+            case MQTT_CMD_BRIGHTNESS:
+                brightness = cmd.intVal;
+                screenOn = true;
+                tft.setBrightness(brightness);
+                markDirty();
+                mqttNotifyStateChange();
+                break;
+            case MQTT_CMD_SCREEN:
+                screenOn = cmd.boolVal;
+                tft.setBrightness(screenOn ? brightness : 0);
+                mqttNotifyStateChange();
                 break;
             case MQTT_CMD_NONE:
                 break;

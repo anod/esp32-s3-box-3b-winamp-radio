@@ -17,7 +17,9 @@ extern char          songTitle[128];
 extern volatile long bitrate;
 extern volatile bool wifiConnected;
 extern volatile int  wifiRssi;
-extern volatile bool btMode;
+extern volatile bool    btMode;
+extern volatile uint8_t brightness;
+extern volatile bool    screenOn;
 extern char          id3Artist[64];
 extern char          id3Title[64];
 extern char          ipAddress[20];
@@ -36,7 +38,9 @@ enum MqttCmdType {
     MQTT_CMD_PREV,
     MQTT_CMD_PLAY,
     MQTT_CMD_PAUSE,
-    MQTT_CMD_STOP
+    MQTT_CMD_STOP,
+    MQTT_CMD_BRIGHTNESS,
+    MQTT_CMD_SCREEN
 };
 
 struct MqttCmd {
