@@ -10,6 +10,7 @@
 extern volatile bool btMode;
 
 static i2s_chan_handle_t i2s1_tx = NULL;
+static volatile uint32_t bridgeSampleRate = 44100;
 
 void initBridgeI2S() {
     if (i2s1_tx) return;  // already initialized
@@ -48,6 +49,13 @@ void deinitBridgeI2S() {
     Serial.println("I2S1 bridge: deinitialized");
 }
 
+void updateBridgeSampleRate(uint32_t rate) {
+    if (rate > 0 && rate != bridgeSampleRate) {
+        Serial.printf("I2S1 bridge: resample %lu → 44100 Hz\n", rate);
+        bridgeSampleRate = rate;
+    }
+}
+
 // Overrides weak audio_process_i2s from ESP32-audioI2S library.
 // Called after volume/gain/EQ, before I2S0 write. Runs on Core 0.
 // I2S0 write MUST proceed (paces the decoder) — we piggyback on it.
@@ -62,5 +70,26 @@ void audio_process_i2s(int32_t* outBuff, int16_t validSamples, bool* continueI2S
     }
 
     size_t written = 0;
-    i2s_channel_write(i2s1_tx, buf, n * sizeof(int16_t), &written, pdMS_TO_TICKS(10));
+    uint32_t srcRate = bridgeSampleRate;
+
+    if (srcRate != 44100 && srcRate > 0) {
+        // Linear interpolation resampler: srcRate → 44100 Hz
+        float step = (float)srcRate / 44100.0f;
+        static int16_t resBuf[4096 * 2];
+        int outIdx = 0;
+        float phase = 0.0f;
+
+        while (phase < validSamples - 1 && outIdx < 4096) {
+            int si = (int)phase;
+            float f = phase - si;
+            resBuf[outIdx * 2]     = (int16_t)(buf[si * 2]     + f * (buf[(si + 1) * 2]     - buf[si * 2]));
+            resBuf[outIdx * 2 + 1] = (int16_t)(buf[si * 2 + 1] + f * (buf[(si + 1) * 2 + 1] - buf[si * 2 + 1]));
+            outIdx++;
+            phase += step;
+        }
+
+        i2s_channel_write(i2s1_tx, resBuf, outIdx * 2 * sizeof(int16_t), &written, pdMS_TO_TICKS(10));
+    } else {
+        i2s_channel_write(i2s1_tx, buf, n * sizeof(int16_t), &written, pdMS_TO_TICKS(10));
+    }
 }

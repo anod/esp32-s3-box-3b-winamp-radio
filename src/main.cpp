@@ -30,6 +30,7 @@ static Preferences prefs;
 // Defined in i2s_bridge.cpp
 extern void initBridgeI2S();
 extern void deinitBridgeI2S();
+extern void updateBridgeSampleRate(uint32_t rate);
 // Station list
 #define NUM_STATIONS 10
 const char* stationUrls[NUM_STATIONS] = {
@@ -1002,6 +1003,10 @@ void audioCallback(Audio::msg_t msg) {
     switch (msg.e) {
         case Audio::evt_info:
             Serial.printf("info: %s\n", msg.msg);
+            if (msg.msg && strncmp(msg.msg, "SampleRate (Hz):", 16) == 0) {
+                uint32_t sr = atol(msg.msg + 16);
+                if (sr > 0) updateBridgeSampleRate(sr);
+            }
             if (msg.msg && strncmp(msg.msg, "BitRate:", 8) == 0) {
                 long br = atol(msg.msg + 8);
                 if (br > 0) {
