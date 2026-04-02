@@ -107,11 +107,13 @@ void loop() {
         a2dpFramesOut = 0;
         a2dpCallbacks = 0;
 
-        Serial.printf("I2S in: %u f/s | A2DP out: %u f/s | callbacks: %u | buf: %u/%u\n",
+        Serial.printf("I2S in: %u f/s | A2DP out: %u f/s | callbacks: %u | buf: %u/%u | underruns: %u\n",
             (uint32_t)(fin  * 1000UL / elapsed),
             (uint32_t)(fout * 1000UL / elapsed),
             (uint32_t)(cb   * 1000UL / elapsed),
-            ringBuf.available(), (uint32_t)RING_BUF_FRAMES);
+            ringBuf.available(), (uint32_t)RING_BUF_FRAMES,
+            ringBuf.underruns());
+        ringBuf.resetUnderruns();
 
         lastPrintMs = now;
     }

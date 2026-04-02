@@ -12,9 +12,11 @@ extern volatile bool btMode;
 static i2s_chan_handle_t i2s1_tx = NULL;
 
 void initBridgeI2S() {
+    if (i2s1_tx) return;  // already initialized
+
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
-    chan_cfg.dma_desc_num = 6;
-    chan_cfg.dma_frame_num = 480;  // 6×480=2880 frames (~65ms) — fits 2+ MP3 frames
+    chan_cfg.dma_desc_num = 16;
+    chan_cfg.dma_frame_num = 480;  // 16×480=7680 frames (~174ms) — survives HTTPS/TLS stalls
     chan_cfg.auto_clear = true;    // send zeros when DMA empty (silence during gaps)
     ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &i2s1_tx, NULL));
 
@@ -32,7 +34,18 @@ void initBridgeI2S() {
     };
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(i2s1_tx, &std_cfg));
     ESP_ERROR_CHECK(i2s_channel_enable(i2s1_tx));
-    Serial.printf("I2S1 bridge: BCLK=%d LRCK=%d DOUT=%d\n", I2S1_BCLK, I2S1_LRCK, I2S1_DOUT);
+    Serial.printf("I2S1 bridge: BCLK=%d LRCK=%d DOUT=%d  DMA=%d frames\n",
+                  I2S1_BCLK, I2S1_LRCK, I2S1_DOUT, 16 * 480);
+}
+
+void deinitBridgeI2S() {
+    i2s_chan_handle_t h = i2s1_tx;
+    i2s1_tx = NULL;  // audio_process_i2s stops immediately
+    if (h) {
+        i2s_channel_disable(h);
+        i2s_del_channel(h);
+    }
+    Serial.println("I2S1 bridge: deinitialized");
 }
 
 // Overrides weak audio_process_i2s from ESP32-audioI2S library.

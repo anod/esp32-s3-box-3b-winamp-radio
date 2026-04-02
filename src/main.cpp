@@ -29,6 +29,7 @@ static Preferences prefs;
 
 // Defined in i2s_bridge.cpp
 extern void initBridgeI2S();
+extern void deinitBridgeI2S();
 // Station list
 #define NUM_STATIONS 10
 const char* stationUrls[NUM_STATIONS] = {
@@ -629,8 +630,15 @@ static void handleTouch() {
     int by = vy + 56;
     int bty = by + 18;
     if (tx >= RPANEL_X && tx <= RPANEL_X + RPANEL_W && ty >= bty && ty <= bty + 16) {
-        btMode = !btMode;
-        digitalWrite(PA_PIN, btMode ? LOW : HIGH);
+        if (!btMode) {
+            initBridgeI2S();
+            btMode = true;
+            digitalWrite(PA_PIN, LOW);
+        } else {
+            btMode = false;
+            digitalWrite(PA_PIN, HIGH);
+            deinitBridgeI2S();
+        }
         markDirty();
         mqttNotifyStateChange();
         touchHighlight = 4; touchHlMs = millis();
@@ -762,8 +770,8 @@ void setup() {
     audio.setVolume(vol);
     audio.setConnectionTimeout(5000, 0);
 
-    // I2S1 bridge to WROOM-32D A2DP bridge
-    initBridgeI2S();
+    // I2S1 bridge to WROOM-32D A2DP bridge (lazy — only when BT active)
+    if (btMode) initBridgeI2S();
 
     // FFT init
     spectrumInit();
