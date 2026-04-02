@@ -94,7 +94,7 @@ static unsigned long lastStatusMs  = 0;
 static unsigned long lastTouchMs   = 0;
 static unsigned long lastVisMs     = 0;
 
-// Touch highlight feedback (-1=none, 0=minus, 1=mute, 2=plus, 3=slider)
+// Touch highlight feedback (-1=none, 0=minus, 1=mute, 2=plus, 3=slider, 4=bt)
 static int       touchHighlight   = -1;
 static unsigned long touchHlMs    = 0;
 
@@ -128,12 +128,12 @@ static uint16_t segColors[MAX_SEGS];              // pre-computed gradient for s
 static constexpr int LPANEL_W   = 198;
 static constexpr int RPANEL_X   = 202;
 static constexpr int RPANEL_W   = 116;
-static constexpr int HDR_H      = 16;
-static constexpr int STA_Y      = 20;
+static constexpr int HDR_H      = 10;
+static constexpr int STA_Y      = 14;
 static constexpr int STA_LINE   = 18;
 static constexpr int TICKER_Y   = 220;
 static constexpr int TICKER_H   = 18;
-static constexpr int TICKER_REGION_Y = 210;   // "NOW PLAYING" label Y
+static constexpr int TICKER_REGION_Y = 206;   // "NOW PLAYING" label Y
 static constexpr int TICKER_BOX_Y   = 218;   // top of ticker box (canvas stops here)
 static constexpr int CANVAS_H       = 218;   // canvas height (above ticker box)
 
@@ -146,6 +146,12 @@ static constexpr int VIZ_H = 38;
 // Theme colours (computed once in setup)
 static uint16_t cBg, cPanel, cBorder, cAccent, cDim, cBright;
 static uint16_t cStationHl, cStationDim, cBarBg, cBtnCol;
+
+// Winamp 2 button palette
+static constexpr uint16_t WA_BTN_FACE  = 0xC618; // #C0C0C0 silver
+static constexpr uint16_t WA_HIGHLIGHT = 0xFFFF; // white bevel
+static constexpr uint16_t WA_SHADOW    = 0x8410; // #808080 shadow
+static constexpr uint16_t WA_BORDER    = 0x2104; // dark outline
 
 // Retained ES8311 handle (avoid leak)
 static es8311_handle_t esHandle = nullptr;
@@ -230,12 +236,48 @@ static void drawFrame() {
     // ── Left panel: station list ──
     canvas.fillRect(2, HDR_H + 4, LPANEL_W - 4, NUM_STATIONS * STA_LINE + 8, cPanel);
     canvas.drawRect(2, HDR_H + 4, LPANEL_W - 4, NUM_STATIONS * STA_LINE + 8, cBorder);
-    canvas.fillRect(4, HDR_H + 1, LPANEL_W - 8, 2, cAccent);
 
-    // Header labels — centered within their panel
-    canvas.setTextColor(cBright, cBg);
-    canvas.drawCenterString("STATIONS", 2 + (LPANEL_W - 4) / 2, 2, 2);
-    canvas.drawCenterString("INTERNET RADIO", RPANEL_X + RPANEL_W / 2, 2, 2);
+    // ── Winamp 2 title bar ──
+    {
+        const int tm = 4;  // top margin
+        const int lm = 6;  // left/right margin
+        const int ly1 = tm + 1, ly2 = ly1 + 4, lh = 2;
+
+        // Logo "R" (accent on dark bg)
+        canvas.setTextColor(cAccent, cBg);
+        canvas.drawString("R", lm, tm, 1);
+
+        // Three dummy buttons (right, accent on dark bg): ○ − ×
+        int bx = 320 - lm - 8;
+        canvas.drawLine(bx + 2, tm + 2, bx + 5, tm + 5, cAccent); // ×
+        canvas.drawLine(bx + 5, tm + 2, bx + 2, tm + 5, cAccent);
+        bx -= 9;
+        canvas.drawFastHLine(bx + 2, tm + 4, 4, cAccent); // −
+        bx -= 9;
+        canvas.drawRect(bx + 2, tm + 2, 4, 4, cAccent); // ○
+
+        int linesL = lm + 8 + 4;   // after logo + 4px padding
+        int linesR = bx - 2;       // before buttons - 2px margin
+
+        // Title (faux bold) centered
+        const char* title = "ESP32 RADIO";
+        int titleW = 67;
+        int titleX = 160;
+        int leftEnd = titleX - titleW / 2 - 4;
+        int rightStart = titleX + titleW / 2 + 4;
+
+        // Left grooved lines
+        canvas.fillRect(linesL, ly1, leftEnd - linesL, lh, cAccent);
+        canvas.fillRect(linesL, ly2, leftEnd - linesL, lh, cAccent);
+        // Right grooved lines
+        canvas.fillRect(rightStart, ly1, linesR - rightStart, lh, cAccent);
+        canvas.fillRect(rightStart, ly2, linesR - rightStart, lh, cAccent);
+
+        // Title text (drawn twice offset for faux bold)
+        canvas.setTextColor(cBright, cBg);
+        canvas.drawCenterString(title, titleX, tm, 1);
+        canvas.drawCenterString(title, titleX + 1, tm, 1);
+    }
 
     for (int i = 0; i < NUM_STATIONS; i++) {
         int y = STA_Y + 6 + i * STA_LINE;
@@ -256,10 +298,24 @@ static void drawFrame() {
     int ry = HDR_H + 4;
     canvas.fillRect(RPANEL_X, ry, RPANEL_W, 56, cPanel);
     canvas.drawRect(RPANEL_X, ry, RPANEL_W, 56, cBorder);
-    canvas.fillRect(RPANEL_X + 2, HDR_H + 1, RPANEL_W - 4, 2, cAccent);
 
     canvas.setTextColor(cDim, cPanel);
     canvas.drawString("WIFI", RPANEL_X + 6, ry + 4, 1);
+    // Signal strength bars (4 ascending bars next to WIFI label)
+    {
+        int bars = 0;
+        if (wifiConnected) {
+            if      (wifiRssi >= -50) bars = 4;
+            else if (wifiRssi >= -60) bars = 3;
+            else if (wifiRssi >= -70) bars = 2;
+            else                      bars = 1;
+        }
+        int bx = RPANEL_X + 32, baseY = ry + 12;
+        for (int i = 0; i < 4; i++) {
+            int bh = 2 + i * 2;
+            canvas.fillRect(bx + i * 3, baseY - bh, 2, bh, (i < bars) ? TFT_GREEN : cDim);
+        }
+    }
     canvas.setTextColor(wifiConnected ? TFT_GREEN : TFT_RED, cPanel);
     canvas.drawString(wifiConnected ? "CONNECTED" : "OFFLINE", RPANEL_X + 6, ry + 16, 1);
     canvas.setTextColor(cBright, cPanel);
@@ -292,25 +348,50 @@ static void drawFrame() {
     canvas.fillRoundRect(barX, barY, barW, 4, 2, cBarBg);
     int fillW = (vol * barW) / MAX_VOLUME;
     canvas.fillRoundRect(barX, barY, fillW, 4, 2, gradientColor565((float)vol / MAX_VOLUME));
-    int knobX = barX + fillW - 4;
+    int knobX = barX + fillW - 5;
     if (knobX < barX) knobX = barX;
-    canvas.fillRoundRect(knobX, barY - 4, 8, 12, 3, cBright);
+    {
+        int kw = 10, kh = 12, ky = barY - 4;
+        canvas.fillRect(knobX, ky, kw, kh, WA_BTN_FACE);
+        canvas.drawRect(knobX, ky, kw, kh, WA_BORDER);
+        canvas.drawFastHLine(knobX + 1, ky + 1, kw - 3, WA_HIGHLIGHT);
+        canvas.drawFastVLine(knobX + 1, ky + 1, kh - 3, WA_HIGHLIGHT);
+        canvas.drawFastHLine(knobX + 1, ky + kh - 2, kw - 2, WA_SHADOW);
+        canvas.drawFastVLine(knobX + kw - 2, ky + 1, kh - 2, WA_SHADOW);
+    }
 
-    // Volume buttons: [ - ] [ MUTE ] [ + ]
+    // Volume buttons: [ - ] [ MUTE ] [ + ] (Winamp 2 style)
     bool muted = (vol == 0);
     bool hlActive = (touchHighlight >= 0 && (millis() - touchHlMs < 200));
-    uint16_t minusCol = (hlActive && touchHighlight == 0) ? TFT_WHITE : cBtnCol;
-    uint16_t muteCol  = (hlActive && touchHighlight == 1) ? TFT_WHITE : (muted ? TFT_RED : cBtnCol);
-    uint16_t plusCol   = (hlActive && touchHighlight == 2) ? TFT_WHITE : cBtnCol;
-    canvas.fillRoundRect(RPANEL_X + 4,  vy + 34, 33, 15, 3, minusCol);
-    canvas.fillRoundRect(RPANEL_X + 41, vy + 34, 33, 15, 3, muteCol);
-    canvas.fillRoundRect(RPANEL_X + 78, vy + 34, 33, 15, 3, plusCol);
-    canvas.setTextColor(cBright, minusCol);
-    canvas.drawCenterString("-",    RPANEL_X + 20,  vy + 38, 1);
-    canvas.setTextColor(cBright, muteCol);
-    canvas.drawCenterString("MUTE", RPANEL_X + 57,  vy + 38, 1);
-    canvas.setTextColor(cBright, plusCol);
-    canvas.drawCenterString("+",    RPANEL_X + 94,  vy + 38, 1);
+    // indicator: -1=none, 0=inactive(gray), 1=active(green)
+    auto drawWaBtn = [&](int bx, int by2, int bw, int bh, bool pressed, const char* label, int indicator = -1) {
+        canvas.fillRect(bx, by2, bw, bh, WA_BTN_FACE);
+        canvas.drawRect(bx, by2, bw, bh, WA_BORDER);
+        if (!pressed) {
+            canvas.drawFastHLine(bx + 1, by2 + 1, bw - 3, WA_HIGHLIGHT);
+            canvas.drawFastVLine(bx + 1, by2 + 1, bh - 3, WA_HIGHLIGHT);
+            canvas.drawFastHLine(bx + 1, by2 + bh - 2, bw - 2, WA_SHADOW);
+            canvas.drawFastVLine(bx + bw - 2, by2 + 1, bh - 2, WA_SHADOW);
+        } else {
+            canvas.drawRect(bx + 1, by2 + 1, bw - 2, bh - 2, WA_SHADOW);
+        }
+        int off = pressed ? 1 : 0;
+        canvas.setTextColor(WA_BORDER, WA_BTN_FACE);
+        if (indicator >= 0) {
+            int ix = bx + 3 + off, iy = by2 + (bh - 5) / 2 + off;
+            canvas.fillRect(ix, iy, 5, 5, indicator ? TFT_GREEN : WA_SHADOW);
+            canvas.drawRect(ix, iy, 5, 5, WA_BORDER);
+            canvas.drawString(label, ix + 6, by2 + (bh / 2) - 3 + off, 1);
+        } else {
+            canvas.drawCenterString(label, bx + bw / 2 + off, by2 + (bh / 2) - 3 + off, 1);
+        }
+    };
+    {
+        int btnY = vy + 34, btnH = 15;
+        drawWaBtn(RPANEL_X + 4,  btnY, 34, btnH, (hlActive && touchHighlight == 0), "-");
+        drawWaBtn(RPANEL_X + 40, btnY, 36, btnH, (hlActive && touchHighlight == 1), "MUTE", muted ? 1 : 0);
+        drawWaBtn(RPANEL_X + 78, btnY, 34, btnH, (hlActive && touchHighlight == 2), "+");
+    }
 
     // ── Right panel: Bitrate ──
     int by = vy + 56;
@@ -323,12 +404,11 @@ static void drawFrame() {
         canvas.drawString(buf, RPANEL_X + 6, by + 4, 1);
     }
 
-    // ── Right panel: BT/Speaker toggle ──
+    // ── Right panel: BT/Speaker toggle (Winamp 2 style) ──
     int bty = by + 18;
-    uint16_t btCol = btMode ? TFT_BLUE : cBtnCol;
-    canvas.fillRoundRect(RPANEL_X + 4, bty, RPANEL_W - 8, 16, 3, btCol);
-    canvas.setTextColor(TFT_WHITE, btCol);
-    canvas.drawCenterString(btMode ? "BT SPEAKER" : "LOCAL SPKR", RPANEL_X + RPANEL_W / 2, bty + 4, 1);
+    drawWaBtn(RPANEL_X + 4, bty, RPANEL_W - 8, 16,
+              (hlActive && touchHighlight == 4),
+              "BT SPEAKER", btMode ? 1 : 0);
 
     // ── "NOW PLAYING" label (inside canvas, above ticker box) ──
     canvas.setTextColor(cDim, cBg);
@@ -521,14 +601,14 @@ static void handleTouch() {
     // Volume buttons: [ - ] [ MUTE ] [ + ] drawn at vy+34
     // Touch zone: vy+30 to vy+54 (4px dead zone above, generous below)
     if (tx > RPANEL_X && ty >= vy + 30 && ty <= vy + 54) {
-        if (tx < RPANEL_X + 37 && vol > 0) {
+        if (tx < RPANEL_X + 39 && vol > 0) {
             vol--;
             audio.setVolume(vol);
             markDirty();
             mqttNotifyStateChange();
             touchHighlight = 0; touchHlMs = millis();
         }
-        else if (tx >= RPANEL_X + 38 && tx < RPANEL_X + 76) {
+        else if (tx >= RPANEL_X + 39 && tx < RPANEL_X + 77) {
             if (vol > 0) { savedVol = vol; vol = 0; }
             else         { vol = savedVol; }
             audio.setVolume(vol);
@@ -536,7 +616,7 @@ static void handleTouch() {
             mqttNotifyStateChange();
             touchHighlight = 1; touchHlMs = millis();
         }
-        else if (tx >= RPANEL_X + 76 && vol < MAX_VOLUME) {
+        else if (tx >= RPANEL_X + 77 && vol < MAX_VOLUME) {
             vol++;
             audio.setVolume(vol);
             markDirty();
@@ -553,6 +633,7 @@ static void handleTouch() {
         digitalWrite(PA_PIN, btMode ? LOW : HIGH);
         markDirty();
         mqttNotifyStateChange();
+        touchHighlight = 4; touchHlMs = millis();
         Serial.printf("Output: %s\n", btMode ? "BT Speaker" : "Local Speaker");
     }
 }
