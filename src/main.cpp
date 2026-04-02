@@ -81,6 +81,13 @@ static char   tickerPrevTitle[128] = "";
 static int    tickerCursorX        = TICKER_SPRITE_W;
 static bool   needsFullRedraw      = true;  // push full canvas when static UI changes
 
+// Screen brightness
+static const uint8_t BRIGHTNESS_LEVELS[] = {20, 80, 160, 255};
+static const int     NUM_BRIGHTNESS      = 4;
+static int           brightnessIdx       = 2;   // default = 160
+static const uint8_t DIM_BRIGHTNESS      = 10;  // when stopped
+static int           prevPlayState       = PS_STOPPED;
+
 // Timing
 static unsigned long lastFrameMs   = 0;
 static unsigned long lastStatusMs  = 0;
@@ -409,7 +416,58 @@ static void scrollTicker() {
 
 static int  savedVol = DEFAULT_VOLUME;
 
+// GT911 home button — read soft-key flag from status register via I2C.
+// LovyanGFX only reads touch coordinates from 0x814E; when the GT911 reports
+// a key press (bit 4) instead of a coordinate touch, LovyanGFX sees zero points
+// and clears the register, discarding the event. We intercept BEFORE getTouch().
+static bool prevHomeBtn = false;
+static uint8_t gt911Addr = 0x14;  // resolved in setup(); fallback 0x5D
+
+static bool readGT911HomeButton() {
+    Wire.beginTransmission(gt911Addr);
+    Wire.write(0x81); Wire.write(0x4E);
+    if (Wire.endTransmission() != 0) return false;
+    if (Wire.requestFrom(gt911Addr, (uint8_t)1) < 1) return false;
+    uint8_t status = Wire.read();
+
+    // Bit 7 = data ready, bit 4 = key/button pressed
+    if ((status & 0x80) && (status & 0x10)) {
+        // Clear status register so GT911 can report new events
+        Wire.beginTransmission(gt911Addr);
+        Wire.write(0x81); Wire.write(0x4E); Wire.write(0x00);
+        Wire.endTransmission();
+        return true;
+    }
+    return false;
+}
+
 static void handleTouch() {
+    // Home button (red circle below screen) — must check BEFORE getTouch()
+    // because getTouch() clears the GT911 status register, discarding key events.
+    bool homeBtn = readGT911HomeButton();
+    if (homeBtn && !prevHomeBtn) {
+        unsigned long now = millis();
+        if (now - lastTouchMs >= 300) {
+            lastTouchMs = now;
+            Serial.println("Home button pressed");
+            if (playState == PS_PLAYING || playState == PS_PAUSED) {
+                pendingStop = true;
+                playState = PS_STOPPED;
+                strlcpy(songTitle, "", sizeof(songTitle));
+                id3Artist[0] = '\0'; id3Title[0] = '\0';
+                bitrate = 0;
+                mqttNotifyStateChange();
+                needsFullRedraw = true;
+            } else {
+                strlcpy(songTitle, "Connecting...", sizeof(songTitle));
+                playState = PS_PLAYING;
+                pendingConnect = true;
+                mqttNotifyStateChange();
+            }
+        }
+    }
+    prevHomeBtn = homeBtn;
+
     lgfx::touch_point_t tp;
     if (!tft.getTouch(&tp)) return;
 
@@ -504,16 +562,12 @@ static bool prevMute = false;
 static unsigned long lastMuteMs = 0;
 
 static void handleButtons() {
-    // Boot button — next station
+    // Boot button — cycle screen brightness
     bool boot = (digitalRead(BTN_BOOT) == LOW);
     if (boot && !prevBoot) {
-        currentStation = (currentStation + 1) % NUM_STATIONS;
-        strlcpy(songTitle, "Connecting...", sizeof(songTitle));
-        id3Artist[0] = '\0'; id3Title[0] = '\0'; bitrate = 0;
-        playState = PS_PLAYING;
-        pendingConnect = true;
-        saveStation();
-        mqttNotifyStateChange();
+        brightnessIdx = (brightnessIdx + 1) % NUM_BRIGHTNESS;
+        tft.setBrightness(BRIGHTNESS_LEVELS[brightnessIdx]);
+        Serial.printf("Brightness: %d\n", BRIGHTNESS_LEVELS[brightnessIdx]);
     }
     prevBoot = boot;
 
@@ -542,6 +596,15 @@ void setup() {
     // I2C for ES8311 codec (port 0, shared with touch)
     Wire.begin(I2C_SDA, I2C_SCL);
 
+    // Probe GT911 I2C address (0x14 or 0x5D depending on INT pin state at reset)
+    Wire.beginTransmission(0x14);
+    if (Wire.endTransmission() == 0) {
+        gt911Addr = 0x14;
+    } else {
+        gt911Addr = 0x5D;
+    }
+    Serial.printf("GT911 addr: 0x%02X\n", gt911Addr);
+
     pinMode(BTN_BOOT, INPUT_PULLUP);
     pinMode(BTN_MUTE, INPUT_PULLDOWN);
 
@@ -553,7 +616,7 @@ void setup() {
 
     // Display
     tft.init();
-    tft.setBrightness(160);
+    tft.setBrightness(BRIGHTNESS_LEVELS[brightnessIdx]);
     tft.fillScreen(TFT_BLACK);
 
     canvas.setColorDepth(16);
@@ -705,6 +768,16 @@ void loop() {
     handleTouch();
     handleButtons();
     flushIfDirty();
+
+    // Auto-dim screen when stopped, restore when playing
+    int ps = playState;  // snapshot volatile once to avoid TOCTOU
+    if (ps != prevPlayState) {
+        if (ps == PS_STOPPED)
+            tft.setBrightness(DIM_BRIGHTNESS);
+        else if (prevPlayState == PS_STOPPED)
+            tft.setBrightness(BRIGHTNESS_LEVELS[brightnessIdx]);
+        prevPlayState = ps;
+    }
 
     // MQTT: process broker messages and publish state if dirty
     mqttLoop();
