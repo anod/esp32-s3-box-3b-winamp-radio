@@ -33,25 +33,25 @@ extern void initBridgeI2S();
 #define NUM_STATIONS 10
 const char* stationUrls[NUM_STATIONS] = {
     "http://ice1.somafm.com/groovesalad-128-mp3",            // Electronic / Chill
-    "http://ice1.somafm.com/thetrip-128-mp3",                // Trance / Progressive
+    "http://listen2.myradio24.com/8226",                      // New Age / Enigmatic
     "http://hirschmilch.de:7000/psytrance.mp3",              // Psytrance
     "http://stream.rockantenne.de/rockantenne/stream/mp3",   // Rock
     "http://listen.181fm.com/181-hardrock_128k.mp3",         // Hard Rock
     "http://stream.rockantenne.de/heavy-metal/stream/mp3",   // Metal
     "http://listen.181fm.com/181-power_128k.mp3",            // Pop / Top 40
-    "http://stream.radioparadise.com/mp3-128",               // Eclectic Mix
+    "https://live.amperwave.net/manifest/audacy-kroqfmaac-hlsc.m3u8", // Alt Rock (KROQ)
     "http://stream.live.vc.bbcmedia.co.uk/bbc_world_service", // News (BBC)
     "http://npr-ice.streamguys1.com/live.mp3"                // News (NPR)
 };
 const char* stationNames[NUM_STATIONS] = {
     "Groove Salad",
-    "The Trip",
+    "Enigmatic Station 1",
     "Psytrance",
     "Rock Antenne",
     "181 Hard Rock",
     "Heavy Metal",
     "181 Power Hits",
-    "Radio Paradise",
+    "KROQ",
     "BBC World News",
     "NPR News"
 };

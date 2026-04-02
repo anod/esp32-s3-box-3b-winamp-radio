@@ -24,8 +24,8 @@ const char* stationUrls[NUM_STATIONS] = {
     "http://f", "http://g", "http://h", "http://i", "http://j"
 };
 const char* stationNames[NUM_STATIONS] = {
-    "Groove Salad", "The Trip", "Psytrance", "Rock Antenne", "181 Hard Rock",
-    "Heavy Metal", "181 Power Hits", "Radio Paradise", "BBC World News", "NPR News"
+    "Groove Salad", "Enigmatic Station 1", "Psytrance", "Rock Antenne", "181 Hard Rock",
+    "Heavy Metal", "181 Power Hits", "KROQ", "BBC World News", "NPR News"
 };
 
 volatile int  currentStation = 0;
