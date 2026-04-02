@@ -505,18 +505,17 @@ static bool prevHomeBtn = false;
 static uint8_t gt911Addr = 0x14;  // resolved in setup(); fallback 0x5D
 
 static bool readGT911HomeButton() {
-    Wire.beginTransmission(gt911Addr);
-    Wire.write(0x81); Wire.write(0x4E);
-    if (Wire.endTransmission() != 0) return false;
-    if (Wire.requestFrom(gt911Addr, (uint8_t)1) < 1) return false;
-    uint8_t status = Wire.read();
+    uint8_t reg[2] = {0x81, 0x4E};
+    uint8_t status = 0;
+
+    if (!lgfx::i2c::transactionWriteRead(0, gt911Addr, reg, 2, &status, 1).has_value())
+        return false;
 
     // Bit 7 = data ready, bit 4 = key/button pressed
     if ((status & 0x80) && (status & 0x10)) {
         // Clear status register so GT911 can report new events
-        Wire.beginTransmission(gt911Addr);
-        Wire.write(0x81); Wire.write(0x4E); Wire.write(0x00);
-        Wire.endTransmission();
+        uint8_t clear[3] = {0x81, 0x4E, 0x00};
+        lgfx::i2c::transactionWrite(0, gt911Addr, clear, 3);
         return true;
     }
     return false;
