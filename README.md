@@ -8,7 +8,8 @@ Based on [VolosR/WaveshareRadioStream](https://github.com/VolosR/WaveshareRadioS
 
 - 10 pre-configured internet radio stations (electronic, trance, rock, metal, pop, news)
 - Touch screen station selection & volume control
-- Hardware buttons: Boot (next station), Mute (GPIO 1)
+- Hardware buttons: Boot (cycle brightness), Mute (GPIO 1), Home (stop/play)
+- Auto-dim screen when stopped, restore on play
 - Scrolling song title ticker with ID3/ICY metadata
 - Real FFT spectrum visualizer (Winamp 2 style segmented bars)
 - WiFi signal strength & bitrate display
@@ -72,7 +73,8 @@ In WSL, grant serial access once: `sudo usermod -aG dialout $USER` (re-login req
 | Touch VOL −/+      | Decrease/increase volume       |
 | Touch MUTE         | Toggle mute                    |
 | Touch BT/SPK       | Toggle Bluetooth/local speaker |
-| Boot button (GPIO0)| Next station                   |
+| Home button (red ●)| Stop/play toggle               |
+| Boot button (GPIO0)| Cycle screen brightness        |
 | Mute button (GPIO1)| Toggle mute                    |
 
 ## Configuration
@@ -100,6 +102,7 @@ Settings can be overridden via `.env` (see `.env.sample`) or edited directly in 
 | I2C bus            | SDA=8, SCL=18                      |
 | Touch (GT911)      | INT=3 (shared I2C bus)             |
 | Power amplifier    | GPIO 46                            |
+| Home button (red ●)| GT911 soft key (I2C reg 0x814E)    |
 | Boot button        | GPIO 0                             |
 | Mute button        | GPIO 1                             |
 

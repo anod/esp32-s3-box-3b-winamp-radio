@@ -9,7 +9,8 @@ PlatformIO Arduino firmware for the ESP32-S3-BOX-3 development board. Streams in
 - **Board**: ESP32-S3-BOX-3 (ESP32-S3, 16MB flash, 8MB OPI PSRAM)
 - **Display**: ILI9342C 320×240 SPI (managed by LovyanGFX autodetect)
 - **Audio**: ES8311 I2C codec → I2S0 → built-in speaker (PA on GPIO 46)
-- **Touch**: GT911 capacitive controller (shared I2C bus with codec)
+- **Touch**: GT911 capacitive controller (shared I2C bus with codec). The red circle "home button" below the screen is a GT911 soft key — NOT a coordinate touch.
+- **Home button**: GT911 soft key, read via I2C register 0x814E bit 4. Must be read BEFORE LovyanGFX `getTouch()` which clears the register.
 - **I2S bridge output**: I2S1 TX on GPIO 10/14/11 → wired to ESP32-WROOM-32D for Bluetooth A2DP
 - **Critical pin note**: BOX-3 uses I2S_LRCK=GPIO45, LCD_BL=GPIO47. BOX v1 has these swapped — do NOT mix them.
 
@@ -101,6 +102,7 @@ Set via `.env` → build flags: `MQTT_BROKER`, `MQTT_PORT`, `MQTT_USER`, `MQTT_P
 - `Wire.begin()` for ES8311 conflicts with LovyanGFX autodetect I2C init (harmless warning: "bus already initialized").
 - The PA pin (GPIO 46) must stay LOW during boot/codec init to prevent speaker noise. Enable after stream connects. Driven LOW when `btMode` is active.
 - Touch coordinates from GT911 autodetect have a Y offset (~+12px) — applied in `handleTouch()`.
+- The GT911 home button (red circle below screen) is a soft key, not a coordinate touch. LovyanGFX `getTouch()` clears the GT911 status register, discarding soft key events. Read 0x814E directly via I2C BEFORE `getTouch()` — check bit 7 (data ready) + bit 4 (key pressed), then clear the register. GT911 I2C address is 0x14 or 0x5D depending on INT pin state at reset; probe at startup.
 - `audio_process_i2s` override MUST be in a separate `.cpp` that doesn't include `Audio.h` — weak attribute taints any definition in the same translation unit.
 - Never set `*continueI2S=false` in `audio_process_i2s` — it removes I2S0 blocking write pacing, causing the decoder to run at CPU speed and flood downstream buffers.
 - ESP32 WiFi and BT Classic (A2DP) cannot coexist — single shared 2.4 GHz radio. Use wired I2S between ESP32s.
