@@ -1,0 +1,84 @@
+# ============================================================
+# Home Assistant Universal Media Player for ESP32 Radio
+#
+# Wraps MQTT device entities into a native media_player.
+#
+# Paste into configuration.yaml under the media_player: key,
+# or use: media_player: !include ha/media_player.yaml
+#
+# Prerequisites:
+#   - MQTT integration configured and connected
+#   - ESP32 Radio device discovered (Settings → Devices → ESP32 Radio)
+#
+# Entity IDs below assume HA auto-generated names. If yours
+# differ (e.g. _2 suffix), check Settings → Devices → ESP32
+# Radio → Entities and update accordingly.
+#
+# Volume: number.esp32_radio_volume publishes 0.0–1.0 with
+# step 0.05, matching the universal player's expected range.
+# ============================================================
+
+- platform: universal
+  name: ESP32 Radio
+  unique_id: esp32radio_media_player
+  device_class: speaker
+  children: []
+
+  attributes:
+    source: select.esp32_radio_station
+    source_list: select.esp32_radio_station|options
+    volume_level: number.esp32_radio_volume
+    is_volume_muted: switch.esp32_radio_mute
+
+  state_template: >-
+    {% set s = states('sensor.esp32_radio_state') %}
+    {% if s == 'playing' %}playing
+    {% elif s == 'paused' %}paused
+    {% elif s == 'idle' %}idle
+    {% else %}off{% endif %}
+
+  commands:
+    turn_on:
+      action: button.press
+      target:
+        entity_id: button.esp32_radio_play
+    turn_off:
+      action: button.press
+      target:
+        entity_id: button.esp32_radio_stop
+    media_play:
+      action: button.press
+      target:
+        entity_id: button.esp32_radio_play
+    media_pause:
+      action: button.press
+      target:
+        entity_id: button.esp32_radio_pause
+    media_stop:
+      action: button.press
+      target:
+        entity_id: button.esp32_radio_stop
+    media_previous_track:
+      action: button.press
+      target:
+        entity_id: button.esp32_radio_previous
+    media_next_track:
+      action: button.press
+      target:
+        entity_id: button.esp32_radio_next
+    volume_set:
+      action: number.set_value
+      target:
+        entity_id: number.esp32_radio_volume
+      data:
+        value: "{{ volume_level }}"
+    volume_mute:
+      action: switch.toggle
+      target:
+        entity_id: switch.esp32_radio_mute
+    select_source:
+      action: select.select_option
+      target:
+        entity_id: select.esp32_radio_station
+      data:
+        option: "{{ source }}"

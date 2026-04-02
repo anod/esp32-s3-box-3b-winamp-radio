@@ -16,6 +16,7 @@
 #include "pins.h"
 #include "es8311.h"
 #include "spectrum.h"
+#include "mqtt.h"
 
 // ─── Globals ──────────────────────────────────────────────
 
@@ -30,7 +31,7 @@ static Preferences prefs;
 extern void initBridgeI2S();
 // Station list
 #define NUM_STATIONS 10
-static const char* stationUrls[NUM_STATIONS] = {
+const char* stationUrls[NUM_STATIONS] = {
     "http://ice1.somafm.com/groovesalad-128-mp3",            // Electronic / Chill
     "http://ice1.somafm.com/thetrip-128-mp3",                // Trance / Progressive
     "http://hirschmilch.de:7000/psytrance.mp3",              // Psytrance
@@ -42,7 +43,7 @@ static const char* stationUrls[NUM_STATIONS] = {
     "http://stream.live.vc.bbcmedia.co.uk/bbc_world_service", // News (BBC)
     "http://npr-ice.streamguys1.com/live.mp3"                // News (NPR)
 };
-static const char* stationNames[NUM_STATIONS] = {
+const char* stationNames[NUM_STATIONS] = {
     "Groove Salad",
     "The Trip",
     "Psytrance",
@@ -56,16 +57,20 @@ static const char* stationNames[NUM_STATIONS] = {
 };
 
 // State (shared between Core 0 audio task and Core 1 render loop)
-static volatile int    currentStation  = 0;
-static volatile int    vol             = DEFAULT_VOLUME;
-static char            songTitle[128]  = "";
-static volatile long   bitrate         = 0;
-static volatile bool   wifiConnected   = false;
-static volatile int    wifiRssi        = 0;
-volatile bool          btMode          = false;  // true = BT speaker, false = local
-static char            id3Artist[64]   = "";
-static char            id3Title[64]    = "";
-static char            ipAddress[20]   = "";
+volatile int    currentStation  = 0;
+volatile int    vol             = DEFAULT_VOLUME;
+char            songTitle[128]  = "";
+volatile long   bitrate         = 0;
+volatile bool   wifiConnected   = false;
+volatile int    wifiRssi        = 0;
+volatile bool   btMode          = false;  // true = BT speaker, false = local
+char            id3Artist[64]   = "";
+char            id3Title[64]    = "";
+char            ipAddress[20]   = "";
+
+// Playback state (for MQTT play/pause/stop commands)
+enum PlayState : int { PS_STOPPED = 0, PS_PLAYING = 1, PS_PAUSED = 2 };
+volatile int    playState       = PS_STOPPED;
 
 // Ticker sprite dimensions
 static constexpr int TICKER_SPRITE_W = 316;
@@ -143,7 +148,10 @@ void audioCallback(Audio::msg_t msg);
 static void audioTask(void *param);
 
 // Pending station change: set on Core 1, consumed on Core 0
-static volatile bool pendingConnect = false;
+static volatile bool pendingConnect  = false;
+// Pending audio commands: set on Core 1, consumed on Core 0
+static volatile bool pendingPause    = false;
+static volatile bool pendingStop     = false;
 
 static void saveStation() {
     prefs.begin("radio", false);
@@ -425,9 +433,11 @@ static void handleTouch() {
             currentStation = idx;
             strlcpy(songTitle, "Connecting...", sizeof(songTitle));
             id3Artist[0] = '\0'; id3Title[0] = '\0'; bitrate = 0;
+            playState = PS_PLAYING;
             pendingConnect = true;
             Serial.printf("Station: %s\n", stationNames[currentStation]);
             saveStation();
+            mqttNotifyStateChange();
         }
     }
 
@@ -446,6 +456,7 @@ static void handleTouch() {
         vol = newVol;
         audio.setVolume(vol);
         markDirty();
+        mqttNotifyStateChange();
         touchHighlight = 3; touchHlMs = millis();
     }
 
@@ -456,6 +467,7 @@ static void handleTouch() {
             vol--;
             audio.setVolume(vol);
             markDirty();
+            mqttNotifyStateChange();
             touchHighlight = 0; touchHlMs = millis();
         }
         else if (tx >= RPANEL_X + 38 && tx < RPANEL_X + 76) {
@@ -463,12 +475,14 @@ static void handleTouch() {
             else         { vol = savedVol; }
             audio.setVolume(vol);
             markDirty();
+            mqttNotifyStateChange();
             touchHighlight = 1; touchHlMs = millis();
         }
         else if (tx >= RPANEL_X + 76 && vol < MAX_VOLUME) {
             vol++;
             audio.setVolume(vol);
             markDirty();
+            mqttNotifyStateChange();
             touchHighlight = 2; touchHlMs = millis();
         }
     }
@@ -480,6 +494,7 @@ static void handleTouch() {
         btMode = !btMode;
         digitalWrite(PA_PIN, btMode ? LOW : HIGH);
         markDirty();
+        mqttNotifyStateChange();
         Serial.printf("Output: %s\n", btMode ? "BT Speaker" : "Local Speaker");
     }
 }
@@ -495,8 +510,10 @@ static void handleButtons() {
         currentStation = (currentStation + 1) % NUM_STATIONS;
         strlcpy(songTitle, "Connecting...", sizeof(songTitle));
         id3Artist[0] = '\0'; id3Title[0] = '\0'; bitrate = 0;
+        playState = PS_PLAYING;
         pendingConnect = true;
         saveStation();
+        mqttNotifyStateChange();
     }
     prevBoot = boot;
 
@@ -509,6 +526,7 @@ static void handleButtons() {
         else         { vol = savedVol; }
         audio.setVolume(vol);
         markDirty();
+        mqttNotifyStateChange();
     }
     prevMute = mute;
 }
@@ -610,11 +628,15 @@ void setup() {
         strlcpy(songTitle, "Connecting...", sizeof(songTitle));
         Serial.printf("Connecting to: %s\n", stationUrls[currentStation]);
         audio.connecttohost(stationUrls[currentStation]);
+        playState = PS_PLAYING;
         delay(200);
         if (!btMode) digitalWrite(PA_PIN, HIGH);  // only enable PA for local speaker
     } else {
         strlcpy(songTitle, "WiFi not connected", sizeof(songTitle));
     }
+
+    // MQTT (after WiFi is connected)
+    mqttInit();
 
     // Start audio on Core 0 (WiFi core) — rendering stays on Core 1
     xTaskCreatePinnedToCore(audioTask, "audio", 12288, NULL, 2, NULL, 0);
@@ -627,6 +649,14 @@ void setup() {
 
 static void audioTask(void *param) {
     for (;;) {
+        if (pendingStop) {
+            pendingStop = false;
+            audio.stopSong();
+        }
+        if (pendingPause) {
+            pendingPause = false;
+            audio.pauseResume();
+        }
         if (pendingConnect) {
             pendingConnect = false;
             audio.connecttohost(stationUrls[currentStation]);
@@ -659,7 +689,9 @@ void loop() {
                 strlcpy(ipAddress, WiFi.localIP().toString().c_str(), sizeof(ipAddress));
                 Serial.println("WiFi reconnected, resuming stream");
                 pendingConnect = true;
+                playState = PS_PLAYING;
                 strlcpy(songTitle, "Reconnecting...", sizeof(songTitle));
+                mqttNotifyStateChange();
             }
         } else {
             wifiRssi = 0;
@@ -673,6 +705,95 @@ void loop() {
     handleTouch();
     handleButtons();
     flushIfDirty();
+
+    // MQTT: process broker messages and publish state if dirty
+    mqttLoop();
+
+    // Process MQTT commands (same pattern as touch/button handlers)
+    if (mqttCmdPending) {
+        mqttCmdPending = false;
+        MqttCmd cmd;
+        cmd.type    = mqttCmd.type;
+        cmd.intVal  = mqttCmd.intVal;
+        cmd.boolVal = mqttCmd.boolVal;
+
+        switch (cmd.type) {
+            case MQTT_CMD_VOLUME:
+                vol = cmd.intVal;
+                if (vol < 0) vol = 0;
+                if (vol > MAX_VOLUME) vol = MAX_VOLUME;
+                audio.setVolume(vol);
+                markDirty();
+                mqttNotifyStateChange();
+                break;
+            case MQTT_CMD_MUTE:
+                if (cmd.boolVal && vol > 0) { savedVol = vol; vol = 0; }
+                else if (!cmd.boolVal && vol == 0) { vol = savedVol; }
+                audio.setVolume(vol);
+                markDirty();
+                mqttNotifyStateChange();
+                break;
+            case MQTT_CMD_SOURCE:
+                if (cmd.intVal >= 0 && cmd.intVal < NUM_STATIONS && cmd.intVal != currentStation) {
+                    currentStation = cmd.intVal;
+                    strlcpy(songTitle, "Connecting...", sizeof(songTitle));
+                    id3Artist[0] = '\0'; id3Title[0] = '\0'; bitrate = 0;
+                    playState = PS_PLAYING;
+                    pendingConnect = true;
+                    markDirty();
+                    mqttNotifyStateChange();
+                }
+                break;
+            case MQTT_CMD_NEXT:
+                currentStation = (currentStation + 1) % NUM_STATIONS;
+                strlcpy(songTitle, "Connecting...", sizeof(songTitle));
+                id3Artist[0] = '\0'; id3Title[0] = '\0'; bitrate = 0;
+                playState = PS_PLAYING;
+                pendingConnect = true;
+                markDirty();
+                mqttNotifyStateChange();
+                break;
+            case MQTT_CMD_PREV:
+                currentStation = (currentStation - 1 + NUM_STATIONS) % NUM_STATIONS;
+                strlcpy(songTitle, "Connecting...", sizeof(songTitle));
+                id3Artist[0] = '\0'; id3Title[0] = '\0'; bitrate = 0;
+                playState = PS_PLAYING;
+                pendingConnect = true;
+                markDirty();
+                mqttNotifyStateChange();
+                break;
+            case MQTT_CMD_PLAY:
+                if (playState == PS_PAUSED) {
+                    pendingPause = true;  // pauseResume() toggle on Core 0
+                    playState = PS_PLAYING;
+                } else if (playState == PS_STOPPED) {
+                    strlcpy(songTitle, "Connecting...", sizeof(songTitle));
+                    playState = PS_PLAYING;
+                    pendingConnect = true;
+                }
+                mqttNotifyStateChange();
+                break;
+            case MQTT_CMD_PAUSE:
+                if (playState == PS_PLAYING) {
+                    pendingPause = true;  // pauseResume() toggle on Core 0
+                    playState = PS_PAUSED;
+                    mqttNotifyStateChange();
+                }
+                break;
+            case MQTT_CMD_STOP:
+                if (playState != PS_STOPPED) {
+                    pendingStop = true;  // stopSong() on Core 0
+                    playState = PS_STOPPED;
+                    strlcpy(songTitle, "", sizeof(songTitle));
+                    bitrate = 0;
+                    mqttNotifyStateChange();
+                    needsFullRedraw = true;
+                }
+                break;
+            case MQTT_CMD_NONE:
+                break;
+        }
+    }
 
     // Clear touch highlight after 200ms
     if (touchHighlight >= 0 && now - touchHlMs >= 200) {
@@ -712,6 +833,7 @@ static void updateId3SongTitle() {
     }
     if (strcmp(songTitle, newTitle) != 0) {
         strlcpy(songTitle, newTitle, sizeof(songTitle));
+        mqttNotifyStateChange();
     }
 }
 
@@ -723,6 +845,7 @@ void audioCallback(Audio::msg_t msg) {
                 long br = atol(msg.msg + 8);
                 if (br > 0) {
                     bitrate = (br >= 1000) ? br / 1000 : br;
+                    mqttNotifyStateChange();
                 }
             }
             break;
@@ -740,10 +863,13 @@ void audioCallback(Audio::msg_t msg) {
             break;
         case Audio::evt_name:
             Serial.printf("station: %s\n", msg.msg);
+            playState = PS_PLAYING;
+            mqttNotifyStateChange();
             if (songTitle[0] == '\0' || strcmp(songTitle, "Connecting...") == 0 ||
                 strcmp(songTitle, "Reconnecting...") == 0) {
                 if (strcmp(songTitle, msg.msg) != 0) {
                     strlcpy(songTitle, msg.msg, sizeof(songTitle));
+                    mqttNotifyStateChange();
                 }
             }
             break;
@@ -753,6 +879,7 @@ void audioCallback(Audio::msg_t msg) {
                 strlcpy(songTitle, msg.msg, sizeof(songTitle));
                 id3Artist[0] = '\0';
                 id3Title[0] = '\0';
+                mqttNotifyStateChange();
             }
             break;
         case Audio::evt_bitrate:
@@ -761,11 +888,14 @@ void audioCallback(Audio::msg_t msg) {
                 long br = atol(msg.msg);
                 if (br > 0) {
                     bitrate = (br >= 1000) ? br / 1000 : br;
+                    mqttNotifyStateChange();
                 }
             }
             break;
         case Audio::evt_eof:
             Serial.println("Stream ended");
+            playState = PS_STOPPED;
+            mqttNotifyStateChange();
             break;
         case Audio::evt_log:
             Serial.printf("log: %s\n", msg.msg);
