@@ -26,5 +26,9 @@ Thumbs.db
 # Credentials
 .env
 
+# ESPHome
+esphome/secrets.yaml
+esphome/.esphome/
+
 # Python virtual environments
 .analysis_venv/
