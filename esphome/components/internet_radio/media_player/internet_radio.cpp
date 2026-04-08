@@ -139,6 +139,8 @@ void InternetRadio::audio_task(void *param) {
 media_player::MediaPlayerTraits InternetRadio::get_traits() {
   media_player::MediaPlayerTraits traits;
   traits.set_supports_pause(true);
+  // NEXT_TRACK/PREVIOUS_TRACK flags exist but aioesphomeapi ≤44.6.2
+  // doesn't transmit command values 14/15. Use button entities instead.
   traits.add_feature_flags(
       media_player::MediaPlayerEntityFeature::PLAY |
       media_player::MediaPlayerEntityFeature::STOP |
@@ -176,6 +178,7 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
   }
 
   if (call.get_command().has_value()) {
+    ESP_LOGI(TAG, "Command received: %d", (int)*call.get_command());
     switch (*call.get_command()) {
       case media_player::MEDIA_PLAYER_COMMAND_PLAY:
         if (this->play_state_ == PS_PAUSED) {
@@ -303,6 +306,16 @@ void InternetRadio::set_station(int idx) {
   int save_sta = idx;
   this->station_pref_.save(&save_sta);
   this->connect_station_();
+}
+
+void InternetRadio::set_volume_direct(int vol) {
+  if (vol < 0) vol = 0;
+  if (vol > 21) vol = 21;
+  this->vol_ = vol;
+  this->audio_.setVolume(vol);
+  this->volume = (float)vol / 21.0f;
+  this->is_muted_ = (vol == 0);
+  this->publish_state();
 }
 
 void InternetRadio::update_ha_state_() {

@@ -89,6 +89,13 @@ switch:
     dout_pin: 11
     pa_pin: 46
 
+# --- Winamp 2 Display ---
+
+winamp_display:
+  radio_id: radio
+  bridge_id: bt_speaker
+  brightness: 160
+
 # --- HA Entities (song title, station picker, controls) ---
 
 button:

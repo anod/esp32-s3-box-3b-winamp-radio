@@ -52,11 +52,16 @@ class InternetRadio : public media_player::MediaPlayer, public Component {
   const char *get_song_title() const { return this->song_title_; }
   const char *get_station_name() const { return stations_[this->current_station_].name; }
   long get_bitrate() const { return this->bitrate_; }
+  int get_vol() const { return this->vol_; }
+  static constexpr int get_max_volume() { return 21; }
 
-  // Station control (for select entity)
+  // Station control (for select entity and display)
   void set_station(int idx);
   static constexpr int get_num_stations() { return NUM_STATIONS; }
   static const char *get_station_name_at(int idx) { return (idx >= 0 && idx < NUM_STATIONS) ? stations_[idx].name : ""; }
+
+  // Volume control from UI (bypasses HA MediaPlayerCall overhead)
+  void set_volume_direct(int vol);
 
   void next_station_();
   void prev_station_();
