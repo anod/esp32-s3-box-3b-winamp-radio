@@ -7,6 +7,7 @@
 #pragma once
 
 #include "esphome/core/component.h"
+#include "esphome/components/i2c/i2c.h"
 
 // LGFX_USE_V1 and LGFX_AUTODETECT are set via build flags
 #include <LovyanGFX.hpp>
@@ -24,7 +25,7 @@ class I2SBridge;
 namespace esphome {
 namespace winamp_display {
 
-class WinampDisplay : public Component {
+class WinampDisplay : public Component, public i2c::I2CDevice {
  public:
   float get_setup_priority() const override {
     // Run after InternetRadio (LATE) and I2SBridge (LATE-1)
@@ -62,9 +63,6 @@ class WinampDisplay : public Component {
 
   // Config
   int brightness_{160};
-
-  // GT911 home button
-  uint8_t gt911_addr_{0x14};
   bool prev_home_btn_{false};
 
   // Theme colors (computed in setup)

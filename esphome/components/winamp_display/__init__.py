@@ -2,12 +2,15 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.const import CONF_ID
 from esphome.components.esp32 import include_builtin_idf_component
+from esphome.components import i2c
 
 CODEOWNERS = ["@alexg"]
-# No DEPENDENCIES — we use use_id() which handles cross-references at codegen time
+DEPENDENCIES = ["i2c"]
 
 winamp_display_ns = cg.esphome_ns.namespace("winamp_display")
-WinampDisplay = winamp_display_ns.class_("WinampDisplay", cg.Component)
+WinampDisplay = winamp_display_ns.class_(
+    "WinampDisplay", cg.Component, i2c.I2CDevice
+)
 
 CONF_RADIO_ID = "radio_id"
 CONF_BRIDGE_ID = "bridge_id"
@@ -20,19 +23,24 @@ InternetRadio = internet_radio_ns.class_("InternetRadio")
 i2s_bridge_ns = cg.esphome_ns.namespace("i2s_bridge")
 I2SBridge = i2s_bridge_ns.class_("I2SBridge")
 
-CONFIG_SCHEMA = cv.Schema(
-    {
-        cv.GenerateID(): cv.declare_id(WinampDisplay),
-        cv.Required(CONF_RADIO_ID): cv.use_id(InternetRadio),
-        cv.Required(CONF_BRIDGE_ID): cv.use_id(I2SBridge),
-        cv.Optional(CONF_BRIGHTNESS, default=160): cv.int_range(min=1, max=255),
-    }
-).extend(cv.COMPONENT_SCHEMA)
+CONFIG_SCHEMA = (
+    cv.Schema(
+        {
+            cv.GenerateID(): cv.declare_id(WinampDisplay),
+            cv.Required(CONF_RADIO_ID): cv.use_id(InternetRadio),
+            cv.Required(CONF_BRIDGE_ID): cv.use_id(I2SBridge),
+            cv.Optional(CONF_BRIGHTNESS, default=160): cv.int_range(min=1, max=255),
+        }
+    )
+    .extend(cv.COMPONENT_SCHEMA)
+    .extend(i2c.i2c_device_schema(0x14))  # GT911 default address
+)
 
 
 async def to_code(config):
     var = cg.new_Pvariable(config[CONF_ID])
     await cg.register_component(var, config)
+    await i2c.register_i2c_device(var, config)
 
     radio = await cg.get_variable(config[CONF_RADIO_ID])
     cg.add(var.set_radio(radio))

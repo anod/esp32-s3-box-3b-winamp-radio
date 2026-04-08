@@ -32,15 +32,17 @@ void WinampDisplay::setup() {
   ESP_LOGI(TAG, "Initializing display...");
 
   // Probe GT911 address (0x14 or 0x5D depending on INT pin state at reset)
+  // Uses ESPHome's I2C bus — the default address (0x14) is set by codegen.
+  // Try reading status register; if it fails, try alternate address.
   {
-    uint8_t reg[2] = {0x81, 0x4E};
     uint8_t dummy = 0;
-    if (lgfx::i2c::transactionWriteRead(0, 0x14, reg, 2, &dummy, 1).has_value()) {
-      this->gt911_addr_ = 0x14;
-    } else if (lgfx::i2c::transactionWriteRead(0, 0x5D, reg, 2, &dummy, 1).has_value()) {
-      this->gt911_addr_ = 0x5D;
+    if (this->read_register16(0x814E, &dummy, 1) != i2c::ERROR_OK) {
+      this->set_i2c_address(0x5D);
+      if (this->read_register16(0x814E, &dummy, 1) != i2c::ERROR_OK) {
+        this->set_i2c_address(0x14);  // fallback
+      }
     }
-    ESP_LOGI(TAG, "GT911 address: 0x%02X", this->gt911_addr_);
+    ESP_LOGI(TAG, "GT911 address: 0x%02X", this->address_);
   }
 
   this->tft_.init();

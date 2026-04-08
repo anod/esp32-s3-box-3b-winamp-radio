@@ -78,6 +78,11 @@ void I2SBridge::init_i2s_() {
   ESP_ERROR_CHECK(i2s_channel_init_std_mode(tx_handle_, &std_cfg));
   ESP_ERROR_CHECK(i2s_channel_enable(tx_handle_));
 
+  // Write silence to prevent pop/crack on BT speaker
+  uint8_t silence[960] = {};
+  size_t written = 0;
+  i2s_channel_write(tx_handle_, silence, sizeof(silence), &written, 100);
+
   ESP_LOGI(TAG, "I2S1: BCLK=%d LRCK=%d DOUT=%d DMA=%d frames",
            this->bclk_pin_, this->lrck_pin_, this->dout_pin_, 16 * 480);
 }

@@ -8,13 +8,9 @@ namespace winamp_display {
 static const char *const TAG_TOUCH = "winamp_touch";
 
 bool WinampDisplay::read_gt911_home_button_() {
-  // Read GT911 status register 0x814E via lgfx::i2c
-  // (LovyanGFX's tft_.getTouch() doesn't work because ESPHome owns
-  // the I2C bus and LovyanGFX failed to initialize its own bus driver)
-  uint8_t reg[2] = {0x81, 0x4E};
+  // Read GT911 status register 0x814E via ESPHome I2C bus
   uint8_t status = 0;
-
-  if (!lgfx::i2c::transactionWriteRead(0, this->gt911_addr_, reg, 2, &status, 1).has_value())
+  if (this->read_register16(0x814E, &status, 1) != i2c::ERROR_OK)
     return false;
 
   if (!(status & 0x80)) return false;  // No data ready
@@ -24,9 +20,8 @@ bool WinampDisplay::read_gt911_home_button_() {
 
   // Read coordinate touch if available (register 0x8150-0x8153)
   if (num_touches > 0 && num_touches <= 5) {
-    uint8_t treg[2] = {0x81, 0x50};
     uint8_t tdata[4] = {};
-    if (lgfx::i2c::transactionWriteRead(0, this->gt911_addr_, treg, 2, tdata, 4).has_value()) {
+    if (this->read_register16(0x8150, tdata, 4) == i2c::ERROR_OK) {
       this->touch_x_ = tdata[0] | (tdata[1] << 8);
       this->touch_y_ = tdata[2] | (tdata[3] << 8);
       this->touch_detected_ = true;
@@ -34,8 +29,9 @@ bool WinampDisplay::read_gt911_home_button_() {
   }
 
   // Clear status register so GT911 can report new events
-  uint8_t clear[3] = {0x81, 0x4E, 0x00};
-  lgfx::i2c::transactionWrite(0, this->gt911_addr_, clear, 3);
+  uint8_t zero = 0;
+  uint8_t clear_cmd[3] = {0x81, 0x4E, 0x00};
+  this->write(clear_cmd, 3);
 
   return home_key;
 }
