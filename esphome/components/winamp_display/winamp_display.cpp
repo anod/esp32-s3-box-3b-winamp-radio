@@ -48,6 +48,21 @@ void WinampDisplay::setup() {
   this->tft_.init();
   this->tft_.setBrightness(this->brightness_);
 
+  // Restore saved brightness from NVS
+  this->brightness_pref_ = global_preferences->make_preference<int>(fnv1_hash("disp_bri"));
+  int saved_bri = 0;
+  if (this->brightness_pref_.load(&saved_bri) && saved_bri >= 1 && saved_bri <= 255) {
+    this->brightness_ = saved_bri;
+    // Sync brightness_idx_ to closest preset
+    for (int i = 0; i < NUM_BRIGHTNESS; i++) {
+      if (abs(saved_bri - BRIGHTNESS_LEVELS[i]) <
+          abs(saved_bri - BRIGHTNESS_LEVELS[this->brightness_idx_]))
+        this->brightness_idx_ = i;
+    }
+    this->tft_.setBrightness(this->brightness_);
+    ESP_LOGI(TAG, "Restored brightness: %d", this->brightness_);
+  }
+
   // Create PSRAM-backed sprites
   this->canvas_.setColorDepth(16);
   this->canvas_.setPsram(true);  // 320×218×2 = 140KB needs PSRAM
@@ -80,6 +95,19 @@ void WinampDisplay::setup() {
   ESP_LOGI(TAG, "Display initialized");
 }
 
+// constexpr static member definition
+constexpr uint8_t WinampDisplay::BRIGHTNESS_LEVELS[];
+
+void WinampDisplay::cycle_brightness() {
+  this->brightness_idx_ = (this->brightness_idx_ + 1) % NUM_BRIGHTNESS;
+  this->brightness_ = BRIGHTNESS_LEVELS[this->brightness_idx_];
+  this->screen_on_ = true;
+  this->tft_.setBrightness(this->brightness_);
+  this->brightness_dirty_ = true;
+  this->brightness_dirty_ms_ = millis();
+  ESP_LOGD(TAG, "Brightness: %d", this->brightness_);
+}
+
 void WinampDisplay::loop() {
   unsigned long now = millis();
 
@@ -104,6 +132,27 @@ void WinampDisplay::loop() {
   if (now - this->last_ticker_ms_ >= 50) {
     this->last_ticker_ms_ = now;
     this->scroll_ticker_();
+  }
+
+  // Auto-dim: dim when stopped, restore when playing
+  if (this->radio_) {
+    int ps = static_cast<int>(this->radio_->get_play_state());
+    if (ps != this->prev_play_state_) {
+      if (this->screen_on_) {
+        if (ps == static_cast<int>(internet_radio::PS_STOPPED))
+          this->tft_.setBrightness(DIM_BRIGHTNESS);
+        else if (this->prev_play_state_ == static_cast<int>(internet_radio::PS_STOPPED))
+          this->tft_.setBrightness(this->brightness_);
+      }
+      this->prev_play_state_ = ps;
+    }
+  }
+
+  // Debounced NVS brightness save
+  if (this->brightness_dirty_ && (now - this->brightness_dirty_ms_ >= NVS_SAVE_DEBOUNCE_MS)) {
+    this->brightness_dirty_ = false;
+    this->brightness_pref_.save(&this->brightness_);
+    ESP_LOGD(TAG, "NVS: saved brightness=%d", this->brightness_);
   }
 }
 

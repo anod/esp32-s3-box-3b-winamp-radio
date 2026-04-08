@@ -7,6 +7,7 @@
 #pragma once
 
 #include "esphome/core/component.h"
+#include "esphome/core/preferences.h"
 #include "esphome/components/i2c/i2c.h"
 
 // LGFX_USE_V1 and LGFX_AUTODETECT are set via build flags
@@ -38,6 +39,8 @@ class WinampDisplay final : public Component, public i2c::I2CDevice {
   void set_radio(internet_radio::InternetRadio *radio) { this->radio_ = radio; }
   void set_bridge(i2s_bridge::I2SBridge *bridge) { this->bridge_ = bridge; }
   void set_brightness(int brightness) { this->brightness_ = brightness; }
+  void cycle_brightness();
+  int get_brightness() const { return this->brightness_; }
 
  protected:
   // Rendering
@@ -63,7 +66,21 @@ class WinampDisplay final : public Component, public i2c::I2CDevice {
 
   // Config
   int brightness_{160};
+  int brightness_idx_{2};
+  bool screen_on_{true};
   bool prev_home_btn_{false};
+
+  // Brightness presets and auto-dim
+  static constexpr uint8_t BRIGHTNESS_LEVELS[] = {20, 80, 160, 255};
+  static constexpr int NUM_BRIGHTNESS = 4;
+  static constexpr uint8_t DIM_BRIGHTNESS = 10;
+  int prev_play_state_{-1};  // track for auto-dim
+
+  // NVS persistence (debounced)
+  ESPPreferenceObject brightness_pref_;
+  bool brightness_dirty_{false};
+  unsigned long brightness_dirty_ms_{0};
+  static constexpr unsigned long NVS_SAVE_DEBOUNCE_MS = 3000;
 
   // Theme colors (computed in setup)
   uint16_t c_bg_, c_panel_, c_border_, c_accent_, c_dim_, c_bright_;

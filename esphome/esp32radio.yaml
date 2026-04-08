@@ -87,9 +87,41 @@ switch:
 # --- Winamp 2 Display ---
 
 winamp_display:
+  id: display
   radio_id: radio
   bridge_id: bt_speaker
   brightness: 160
+
+# --- Hardware Buttons ---
+
+binary_sensor:
+  - platform: gpio
+    name: "Boot Button"
+    id: boot_button
+    pin:
+      number: GPIO0
+      mode: INPUT_PULLUP
+      inverted: true  # active LOW
+    internal: true
+    on_press:
+      - lambda: id(display).cycle_brightness();
+
+  - platform: gpio
+    name: "Mute Switch"
+    id: mute_switch
+    pin:
+      number: GPIO1
+      mode: INPUT_PULLDOWN
+    internal: true
+    on_state:
+      - lambda: |-
+          auto call = id(radio).make_call();
+          if (x) {
+            call.set_command(esphome::media_player::MEDIA_PLAYER_COMMAND_MUTE);
+          } else {
+            call.set_command(esphome::media_player::MEDIA_PLAYER_COMMAND_UNMUTE);
+          }
+          call.perform();
 
 # --- HA Entities (song title, station picker, controls) ---
 
