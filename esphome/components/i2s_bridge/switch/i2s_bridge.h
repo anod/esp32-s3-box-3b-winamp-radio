@@ -21,6 +21,7 @@ class I2SBridge : public switch_::Switch, public Component {
   void set_bclk_pin(int pin) { this->bclk_pin_ = pin; }
   void set_lrck_pin(int pin) { this->lrck_pin_ = pin; }
   void set_dout_pin(int pin) { this->dout_pin_ = pin; }
+  void set_pa_pin(int pin) { this->pa_pin_ = pin; }
 
   // Called from audio_process_i2s (separate TU)
   static i2s_chan_handle_t get_tx_handle();
@@ -35,6 +36,7 @@ class I2SBridge : public switch_::Switch, public Component {
   int bclk_pin_{10};
   int lrck_pin_{14};
   int dout_pin_{11};
+  int pa_pin_{-1};
 
   static i2s_chan_handle_t tx_handle_;
   static volatile bool active_;

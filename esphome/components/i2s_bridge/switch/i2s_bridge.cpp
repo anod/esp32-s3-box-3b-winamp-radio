@@ -30,13 +30,22 @@ void I2SBridge::setup() {
 
 void I2SBridge::write_state(bool state) {
   if (state && !tx_handle_) {
+    // Mute internal speaker before enabling bridge
+    if (this->pa_pin_ >= 0) {
+      pinMode(this->pa_pin_, OUTPUT);
+      digitalWrite(this->pa_pin_, LOW);
+    }
     this->init_i2s_();
     active_ = true;
-    ESP_LOGI(TAG, "I2S bridge enabled");
+    ESP_LOGI(TAG, "I2S bridge enabled (internal speaker muted)");
   } else if (!state && tx_handle_) {
     active_ = false;
     this->deinit_i2s_();
-    ESP_LOGI(TAG, "I2S bridge disabled");
+    // Re-enable internal speaker
+    if (this->pa_pin_ >= 0) {
+      digitalWrite(this->pa_pin_, HIGH);
+    }
+    ESP_LOGI(TAG, "I2S bridge disabled (internal speaker restored)");
   }
   this->publish_state(state);
 }

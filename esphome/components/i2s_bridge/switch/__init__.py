@@ -10,6 +10,7 @@ I2SBridge = i2s_bridge_ns.class_("I2SBridge", switch.Switch, cg.Component)
 CONF_BCLK_PIN = "bclk_pin"
 CONF_LRCK_PIN = "lrck_pin"
 CONF_DOUT_PIN = "dout_pin"
+CONF_PA_PIN = "pa_pin"
 
 CONFIG_SCHEMA = (
     switch.switch_schema(I2SBridge)
@@ -18,6 +19,7 @@ CONFIG_SCHEMA = (
             cv.Required(CONF_BCLK_PIN): cv.int_range(min=0, max=48),
             cv.Required(CONF_LRCK_PIN): cv.int_range(min=0, max=48),
             cv.Required(CONF_DOUT_PIN): cv.int_range(min=0, max=48),
+            cv.Optional(CONF_PA_PIN, default=-1): cv.int_range(min=-1, max=48),
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -32,3 +34,4 @@ async def to_code(config):
     cg.add(var.set_bclk_pin(config[CONF_BCLK_PIN]))
     cg.add(var.set_lrck_pin(config[CONF_LRCK_PIN]))
     cg.add(var.set_dout_pin(config[CONF_DOUT_PIN]))
+    cg.add(var.set_pa_pin(config[CONF_PA_PIN]))

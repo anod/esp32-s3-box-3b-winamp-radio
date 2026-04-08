@@ -86,3 +86,4 @@ switch:
     bclk_pin: 10
     lrck_pin: 14
     dout_pin: 11
+    pa_pin: 46

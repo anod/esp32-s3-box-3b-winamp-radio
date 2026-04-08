@@ -5,6 +5,7 @@
 #include "internet_radio.h"
 #include "esphome/core/log.h"
 #include "esphome/components/network/util.h"
+#include "../../i2s_bridge/switch/i2s_bridge.h"
 
 namespace esphome {
 namespace internet_radio {
@@ -197,7 +198,8 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
         if (this->play_state_ != PS_STOPPED) {
           this->pending_stop_ = true;
           this->play_state_ = PS_STOPPED;
-          if (this->pa_pin_ >= 0) digitalWrite(this->pa_pin_, LOW);
+          if (this->pa_pin_ >= 0 && !i2s_bridge::I2SBridge::is_active())
+            digitalWrite(this->pa_pin_, LOW);
         }
         break;
 
@@ -274,8 +276,8 @@ void InternetRadio::connect_station_() {
   strlcpy(this->song_title_, "Connecting...", sizeof(this->song_title_));
   this->play_state_ = PS_PLAYING;
   this->pending_connect_ = true;
-  // Enable PA for local speaker after short delay
-  if (this->pa_pin_ >= 0) {
+  // Enable PA only when NOT routing to BT bridge
+  if (this->pa_pin_ >= 0 && !i2s_bridge::I2SBridge::is_active()) {
     delay(200);
     digitalWrite(this->pa_pin_, HIGH);
   }
