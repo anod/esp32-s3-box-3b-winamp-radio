@@ -3,6 +3,7 @@
 #include "esphome/components/i2s_bridge/switch/i2s_bridge.h"
 #include "esphome/components/wifi/wifi_component.h"
 #include "esphome/components/network/util.h"
+#include "esphome/components/network/ip_address.h"
 
 namespace esphome {
 namespace winamp_display {
@@ -54,9 +55,6 @@ void WinampDisplay::setup() {
   this->ticker_sprite_.setColorDepth(16);
   this->ticker_sprite_.createSprite(TICKER_SPRITE_W, TICKER_SPRITE_H);
 
-  this->viz_sprite_.setColorDepth(16);
-  this->viz_sprite_.createSprite(VIZ_W, VIZ_H);
-
   // Pre-compute theme colors — match original Winamp 2 palette
   this->c_bg_ = lgfx::color565(50, 50, 60);
   this->c_panel_ = TFT_BLACK;
@@ -88,12 +86,10 @@ void WinampDisplay::loop() {
     this->touch_highlight_ = -1;
   }
 
-  // Touch input (~30Hz)
-  if (now - this->last_touch_ms_ >= 33) {
-    this->handle_touch_();
-  }
+  // Touch input — every loop iteration (like original)
+  this->handle_touch_();
 
-  // Main frame (~15fps = 66ms)
+  // Main frame + visualizer (~15fps = 66ms) — single canvas push
   if (now - this->last_frame_ms_ >= 66) {
     this->last_frame_ms_ = now;
     this->draw_frame_();
@@ -103,12 +99,6 @@ void WinampDisplay::loop() {
   if (now - this->last_ticker_ms_ >= 50) {
     this->last_ticker_ms_ = now;
     this->scroll_ticker_();
-  }
-
-  // Visualizer (~15fps)
-  if (now - this->last_vis_ms_ >= 66) {
-    this->last_vis_ms_ = now;
-    this->draw_visualizer_();
   }
 }
 
@@ -244,14 +234,16 @@ void WinampDisplay::draw_frame_() {
     c.drawString(buf, RPANEL_X + 6, ry + 28, 1);
   }
   if (wifi_connected) {
-    // Cache IP string to avoid calling toString() every frame
+    // Cache IP string — use ESPHome network API
     static char ip_str[16] = "";
     static unsigned long last_ip_ms = 0;
     unsigned long now = millis();
     if (now - last_ip_ms > 10000 || ip_str[0] == '\0') {
       last_ip_ms = now;
-      auto ip = WiFi.localIP();
-      snprintf(ip_str, sizeof(ip_str), "%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
+      auto addrs = network::get_ip_addresses();
+      if (!addrs.empty()) {
+        addrs[0].str_to(ip_str);
+      }
     }
     c.setTextColor(this->c_dim_, this->c_panel_);
     c.drawString(ip_str, RPANEL_X + 6, ry + 42, 1);
@@ -321,6 +313,10 @@ void WinampDisplay::draw_frame_() {
   c.setTextColor(this->c_dim_, this->c_bg_);
   c.drawString("NOW PLAYING", 6, TICKER_REGION_Y, 1);
 
+  // ── Visualizer panel (drawn into canvas — no separate sprite push) ──
+  c.fillRect(VIZ_X, VIZ_Y, VIZ_W, VIZ_H, this->c_panel_);
+  c.drawRect(VIZ_X, VIZ_Y, VIZ_W, VIZ_H, this->c_border_);
+
   // Outer frame
   c.drawRect(0, 0, 320, CANVAS_H, this->c_border_);
 
@@ -349,15 +345,6 @@ void WinampDisplay::scroll_ticker_() {
   }
 
   ts.pushSprite(2, TICKER_BOX_Y);
-}
-
-void WinampDisplay::draw_visualizer_() {
-  // Placeholder — spectrum data requires FFT in audio callback
-  // For now, draw empty visualizer panel
-  auto &v = this->viz_sprite_;
-  v.fillSprite(this->c_panel_);
-  v.drawRect(0, 0, VIZ_W, VIZ_H, this->c_border_);
-  v.pushSprite(VIZ_X, VIZ_Y);
 }
 
 }  // namespace winamp_display

@@ -42,7 +42,6 @@ class WinampDisplay : public Component {
   // Rendering
   void draw_frame_();
   void scroll_ticker_();
-  void draw_visualizer_();
 
   // Touch handling (implemented in winamp_touch.cpp)
   void handle_touch_();
@@ -60,7 +59,6 @@ class WinampDisplay : public Component {
   LGFX tft_;
   LGFX_Sprite canvas_{&tft_};
   LGFX_Sprite ticker_sprite_{&tft_};
-  LGFX_Sprite viz_sprite_{&tft_};
 
   // Config
   int brightness_{160};
@@ -117,10 +115,12 @@ class WinampDisplay : public Component {
   unsigned long touch_hl_ms_{0};
   unsigned long last_touch_ms_{0};
   int saved_vol_{15};
+  bool touch_detected_{false};
+  int touch_x_{0};
+  int touch_y_{0};
 
   // Timing
   unsigned long last_frame_ms_{0};
-  unsigned long last_vis_ms_{0};
   unsigned long last_ticker_ms_{0};
 };
 

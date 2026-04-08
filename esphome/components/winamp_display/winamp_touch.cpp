@@ -8,28 +8,47 @@ namespace winamp_display {
 static const char *const TAG_TOUCH = "winamp_touch";
 
 bool WinampDisplay::read_gt911_home_button_() {
+  // Read GT911 status register 0x814E via lgfx::i2c
+  // (LovyanGFX's tft_.getTouch() doesn't work because ESPHome owns
+  // the I2C bus and LovyanGFX failed to initialize its own bus driver)
   uint8_t reg[2] = {0x81, 0x4E};
   uint8_t status = 0;
 
   if (!lgfx::i2c::transactionWriteRead(0, this->gt911_addr_, reg, 2, &status, 1).has_value())
     return false;
 
-  // Bit 7 = data ready, bit 4 = key/button pressed
-  if ((status & 0x80) && (status & 0x10)) {
-    // Clear status register so GT911 can report new events
-    uint8_t clear[3] = {0x81, 0x4E, 0x00};
-    lgfx::i2c::transactionWrite(0, this->gt911_addr_, clear, 3);
-    return true;
+  if (!(status & 0x80)) return false;  // No data ready
+
+  bool home_key = (status & 0x10) != 0;
+  int num_touches = status & 0x0F;
+
+  // Read coordinate touch if available (register 0x8150-0x8153)
+  if (num_touches > 0 && num_touches <= 5) {
+    uint8_t treg[2] = {0x81, 0x50};
+    uint8_t tdata[4] = {};
+    if (lgfx::i2c::transactionWriteRead(0, this->gt911_addr_, treg, 2, tdata, 4).has_value()) {
+      this->touch_x_ = tdata[0] | (tdata[1] << 8);
+      this->touch_y_ = tdata[2] | (tdata[3] << 8);
+      this->touch_detected_ = true;
+    }
   }
-  return false;
+
+  // Clear status register so GT911 can report new events
+  uint8_t clear[3] = {0x81, 0x4E, 0x00};
+  lgfx::i2c::transactionWrite(0, this->gt911_addr_, clear, 3);
+
+  return home_key;
 }
 
 void WinampDisplay::handle_touch_() {
   using namespace internet_radio;
 
-  // Home button (red circle below screen) — must check BEFORE getTouch()
-  // because getTouch() clears the GT911 status register, discarding key events.
+  this->touch_detected_ = false;
+
+  // Read GT911 — gets home button state AND coordinate touch in one pass
   bool home_btn = this->read_gt911_home_button_();
+
+  // Home button (red circle below screen)
   if (home_btn && !this->prev_home_btn_) {
     unsigned long now = millis();
     if (now - this->last_touch_ms_ >= 300) {
@@ -38,12 +57,10 @@ void WinampDisplay::handle_touch_() {
       if (this->radio_) {
         PlayState ps = this->radio_->get_play_state();
         if (ps == PS_PLAYING || ps == PS_PAUSED) {
-          // Stop playback
           auto call = this->radio_->make_call();
           call.set_command(media_player::MEDIA_PLAYER_COMMAND_STOP);
           call.perform();
         } else {
-          // Resume playback
           auto call = this->radio_->make_call();
           call.set_command(media_player::MEDIA_PLAYER_COMMAND_PLAY);
           call.perform();
@@ -54,14 +71,13 @@ void WinampDisplay::handle_touch_() {
   this->prev_home_btn_ = home_btn;
 
   // Coordinate touch
-  lgfx::touch_point_t tp;
-  if (!this->tft_.getTouch(&tp)) return;
+  if (!this->touch_detected_) return;
 
   unsigned long now = millis();
   if (now - this->last_touch_ms_ < 300) return;
   this->last_touch_ms_ = now;
 
-  int tx = tp.x, ty = tp.y + 12;  // GT911 Y offset compensation
+  int tx = this->touch_x_, ty = this->touch_y_ + 12;  // GT911 Y offset
 
   int num_stations = InternetRadio::get_num_stations();
   int max_vol = InternetRadio::get_max_volume();
