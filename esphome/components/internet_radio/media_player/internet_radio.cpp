@@ -352,6 +352,12 @@ void InternetRadio::audio_callback(Audio::msg_t msg) {
           self->bitrate_ = (br >= 1000) ? br / 1000 : br;
         }
       }
+      if (msg.msg && strncmp(msg.msg, "SampleRate (Hz):", 16) == 0) {
+        uint32_t sr = atol(msg.msg + 16);
+        if (sr > 0) {
+          i2s_bridge::I2SBridge::bridge_sample_rate = sr;
+        }
+      }
       break;
 
     case Audio::evt_streamtitle:

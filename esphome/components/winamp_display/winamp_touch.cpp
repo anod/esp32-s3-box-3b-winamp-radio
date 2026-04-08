@@ -73,7 +73,8 @@ void WinampDisplay::handle_touch_() {
   if (now - this->last_touch_ms_ < 300) return;
   this->last_touch_ms_ = now;
 
-  int tx = this->touch_x_, ty = this->touch_y_ + 12;  // GT911 Y offset
+  int tx = this->touch_x_, ty = this->touch_y_;  // raw GT911 coords match screen coords
+  ESP_LOGD(TAG_TOUCH, "Touch: raw=(%d,%d)", this->touch_x_, this->touch_y_);
 
   int num_stations = InternetRadio::get_num_stations();
   int max_vol = InternetRadio::get_max_volume();
@@ -137,10 +138,10 @@ void WinampDisplay::handle_touch_() {
     return;
   }
 
-  // BT Speaker toggle
+  // BT Speaker toggle (generous zone — button is near screen bottom edge)
   int by = vy + 56;
   int bty = by + 18;
-  if (tx >= RPANEL_X && tx <= RPANEL_X + RPANEL_W && ty >= bty && ty <= bty + 16) {
+  if (tx >= RPANEL_X && tx <= RPANEL_X + RPANEL_W && ty >= bty - 6 && ty <= bty + 24) {
     if (this->bridge_) {
       bool active = i2s_bridge::I2SBridge::is_active();
       if (active) {
