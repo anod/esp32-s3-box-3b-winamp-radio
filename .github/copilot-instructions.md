@@ -81,10 +81,28 @@ Components initialize in order: InternetRadio (`LATE`) → I2SBridge (`LATE - 1`
 ### HA Integration
 
 - ESPHome native API replaces MQTT for HA communication
-- `MediaPlayer` entity: play/pause/stop/volume/mute (no next/prev — protocol gap)
+- `MediaPlayer` entity: play/pause/stop/toggle/volume/mute/turn_on/turn_off + play_media (arbitrary URLs)
 - `template text_sensor` "Now Playing": publishes song title
 - `template select` "Station": publishes and accepts station selection
-- `button` entities for Next/Previous: workaround for missing `NEXT_TRACK`/`PREVIOUS_TRACK` in ESPHome's MediaPlayerCommand protobuf (aioesphomeapi stops at `TURN_OFF=13`)
+- `button` entities for Next/Previous: required workaround (see API Protocol Gap below)
+- `play_media`: accepts arbitrary HTTP stream URLs from HA media browser or automations
+
+### ESPHome API Protocol Gap (CRITICAL)
+
+The ESPHome native API protocol does **NOT** support NEXT/PREV/SELECT_SOURCE commands from HA. The gap spans the full stack:
+
+1. **ESPHome protobuf** (`api.proto`): `MediaPlayerCommand` enum stops at `TURN_OFF=13` — no `NEXT(14)`, `PREVIOUS(15)`
+2. **aioesphomeapi** (`model.py`): Same — `MediaPlayerCommand` enum stops at `TURN_OFF=13`
+3. **HA integration** (`media_player.py`): No `async_media_next_track()` or `async_media_previous_track()` methods
+
+Even `speaker_source` (the new official ESPHome media player component) has the same gap — its own `get_traits()` comment says: *"the ESPHome API currently doesn't support those commands"* (March 2026).
+
+**Consequences:**
+- Do NOT add `NEXT_TRACK`/`PREVIOUS_TRACK` to `get_traits()` feature flags — HA would show buttons that raise `NotImplementedError`
+- Use `button` entities as the workaround for next/prev — they work via `on_press` lambdas
+- The `select` entity for station switching works and should be kept
+- Our C++ code handles `MEDIA_PLAYER_COMMAND_NEXT`/`PREVIOUS` internally (for ESPHome automations/lambdas) — when the protocol is updated, they'll "just work"
+- `speaker_source` is NOT a viable replacement: requires ESP-IDF framework (we use Arduino for ESP32-audioI2S), uses a completely different audio pipeline (ESPHome speaker + media_source), and has the same NEXT/PREV gap
 
 ## ESPHome Build System
 
@@ -170,10 +188,11 @@ ESPHome's `i2c:` component owns I2C bus 0 (GPIO 8/18). LovyanGFX `tft_.init()` t
 
 ### ESPHome API Protocol Gaps
 
-- `MediaPlayerCommand` protobuf stops at `TURN_OFF=13` — no `NEXT(14)`/`PREVIOUS(15)`
-- `aioesphomeapi` PR #911 to add them was **Closed** (not merged)
-- Use `button` entities as the workaround
-- Do NOT add `NEXT_TRACK`/`PREVIOUS_TRACK` feature flags — they're misleading since commands can't be sent
+See **ESPHome API Protocol Gap** section above for full details. Key rules:
+- Do NOT add `NEXT_TRACK`/`PREVIOUS_TRACK` to feature flags — HA shows buttons that raise `NotImplementedError`
+- Use `button` entities for next/prev (work via `on_press` lambdas)
+- `speaker_source` has the same gap — it is NOT a viable alternative
+- Our C++ handlers for NEXT/PREV work internally (automations/lambdas) and will auto-activate when protocol is updated
 
 ### WiFi and Network APIs
 

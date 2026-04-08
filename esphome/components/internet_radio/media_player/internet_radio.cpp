@@ -149,15 +149,20 @@ void InternetRadio::audio_task(void *param) {
 media_player::MediaPlayerTraits InternetRadio::get_traits() {
   media_player::MediaPlayerTraits traits;
   traits.set_supports_pause(true);
-  // NEXT_TRACK/PREVIOUS_TRACK flags exist but aioesphomeapi ≤44.6.2
-  // doesn't transmit command values 14/15. Use button entities instead.
+  // NEXT_TRACK/PREVIOUS_TRACK: the ESPHome API protobuf MediaPlayerCommand
+  // enum stops at TURN_OFF=13 — values 14/15 are NOT transmitted. aioesphomeapi
+  // and the HA ESPHome integration also lack these. Even speaker_source has the
+  // same gap (confirmed March 2026). Use button entities for next/prev.
   traits.add_feature_flags(
       media_player::MediaPlayerEntityFeature::PLAY |
       media_player::MediaPlayerEntityFeature::STOP |
       media_player::MediaPlayerEntityFeature::VOLUME_SET |
       media_player::MediaPlayerEntityFeature::VOLUME_MUTE |
       media_player::MediaPlayerEntityFeature::VOLUME_STEP |
-      media_player::MediaPlayerEntityFeature::PLAY_MEDIA);
+      media_player::MediaPlayerEntityFeature::PLAY_MEDIA |
+      media_player::MediaPlayerEntityFeature::BROWSE_MEDIA |
+      media_player::MediaPlayerEntityFeature::TURN_ON |
+      media_player::MediaPlayerEntityFeature::TURN_OFF);
   return traits;
 }
 
@@ -175,14 +180,18 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
   }
 
   if (call.get_media_url().has_value()) {
-    // Play a specific URL (from HA media browser or TTS)
     const std::string &url = *call.get_media_url();
     ESP_LOGI(TAG, "Play URL: %s", url.c_str());
-    // For now, use connecttohost directly — URL is temporary so we need to
-    // copy it and let the audio task pick it up. For PoC, set pending connect
-    // with the station URL mechanism.
-    // TODO: support arbitrary URLs beyond preset stations
+    strlcpy(this->pending_url_, url.c_str(), sizeof(this->pending_url_));
+    int write_idx = 1 - this->title_read_idx_;
+    strlcpy(this->title_bufs_[write_idx], "Connecting...", 128);
+    this->title_read_idx_ = write_idx;
+    this->play_state_ = PS_PLAYING;
     this->pending_connect_ = true;
+    if (this->pa_pin_ >= 0 && !i2s_bridge::I2SBridge::is_active()) {
+      this->pa_pending_ms_ = millis();
+      this->pa_pending_ = true;
+    }
   }
 
   if (call.get_command().has_value()) {
@@ -220,6 +229,21 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
           this->pending_pause_ = true;
         } else {
           this->connect_station_();
+        }
+        break;
+
+      case media_player::MEDIA_PLAYER_COMMAND_TURN_ON:
+        if (this->play_state_ == PS_STOPPED) {
+          this->connect_station_();
+        }
+        break;
+
+      case media_player::MEDIA_PLAYER_COMMAND_TURN_OFF:
+        if (this->play_state_ != PS_STOPPED) {
+          this->pending_stop_ = true;
+          this->play_state_ = PS_STOPPED;
+          if (this->pa_pin_ >= 0 && !i2s_bridge::I2SBridge::is_active())
+            digitalWrite(this->pa_pin_, LOW);
         }
         break;
 
