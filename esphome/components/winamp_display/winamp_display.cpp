@@ -88,8 +88,11 @@ void WinampDisplay::loop() {
     this->touch_highlight_ = -1;
   }
 
-  // Touch input — every loop iteration (like original)
-  this->handle_touch_();
+  // Touch input — rate-limited to 20ms (50Hz) to reduce I2C bus contention
+  if (now - this->last_touch_ms_loop_ >= 20) {
+    this->last_touch_ms_loop_ = now;
+    this->handle_touch_();
+  }
 
   // Main frame + visualizer (~15fps = 66ms) — single canvas push
   if (now - this->last_frame_ms_ >= 66) {

@@ -44,11 +44,6 @@ wifi:
     ssid: "ESP32Radio-AP"
     password: !secret ap_password
 
-captive_portal:
-
-web_server:
-  port: 80
-
 i2c:
   sda: GPIO8
   scl: GPIO18

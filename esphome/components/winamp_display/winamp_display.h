@@ -120,6 +120,7 @@ class WinampDisplay final : public Component, public i2c::I2CDevice {
   // Timing
   unsigned long last_frame_ms_{0};
   unsigned long last_ticker_ms_{0};
+  unsigned long last_touch_ms_loop_{0};
 };
 
 }  // namespace winamp_display

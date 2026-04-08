@@ -70,7 +70,8 @@ void InternetRadio::setup() {
   ESP_LOGI(TAG, "Waiting for WiFi before streaming...");
 
   // Launch audio task on Core 0
-  xTaskCreatePinnedToCore(audio_task, "audio", 12288, this, 2, nullptr, 0);
+  // Audio task on Core 0 — priority 5 to preempt lower-priority tasks
+  xTaskCreatePinnedToCore(audio_task, "audio", 12288, this, 5, nullptr, 0);
 
   ESP_LOGI(TAG, "Audio task started on Core 0");
 }
@@ -183,6 +184,8 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
     const std::string &url = *call.get_media_url();
     ESP_LOGI(TAG, "Play URL: %s", url.c_str());
     strlcpy(this->pending_url_, url.c_str(), sizeof(this->pending_url_));
+    this->id3_artist_[0] = '\0';
+    this->id3_title_[0] = '\0';
     int write_idx = 1 - this->title_read_idx_;
     strlcpy(this->title_bufs_[write_idx], "Connecting...", 128);
     this->title_read_idx_ = write_idx;
@@ -307,6 +310,8 @@ void InternetRadio::connect_station_() {
   // Copy URL before setting flag — eliminates ordering race with Core 0
   strlcpy(this->pending_url_, stations_[this->current_station_].url,
           sizeof(this->pending_url_));
+  this->id3_artist_[0] = '\0';
+  this->id3_title_[0] = '\0';
   // Write title to the buffer Core 0 isn't reading
   int write_idx = 1 - this->title_read_idx_;
   strlcpy(this->title_bufs_[write_idx], "Connecting...", 128);
@@ -389,6 +394,25 @@ void InternetRadio::flush_vol_if_dirty_() {
   }
 }
 
+// Combine id3_artist_ and id3_title_ into "Artist - Title" display string.
+// Called on Core 0 from audio callback.
+void InternetRadio::update_id3_song_title_() {
+  char combined[128];
+  if (this->id3_title_[0] && this->id3_artist_[0]) {
+    snprintf(combined, sizeof(combined), "%s - %s", this->id3_artist_, this->id3_title_);
+  } else if (this->id3_title_[0]) {
+    strlcpy(combined, this->id3_title_, sizeof(combined));
+  } else if (this->id3_artist_[0]) {
+    strlcpy(combined, this->id3_artist_, sizeof(combined));
+  } else {
+    return;
+  }
+  int wi = 1 - this->title_read_idx_;
+  if (strcmp(this->title_bufs_[wi], combined) == 0) return;
+  strlcpy(this->title_bufs_[wi], combined, 128);
+  this->title_read_idx_ = wi;
+}
+
 // ─── Audio callbacks (runs on Core 0) ─────────────────────
 
 void InternetRadio::audio_callback(Audio::msg_t msg) {
@@ -397,7 +421,9 @@ void InternetRadio::audio_callback(Audio::msg_t msg) {
 
   switch (msg.e) {
     case Audio::evt_info:
-      ESP_LOGD(TAG, "info: %s", msg.msg);
+      // Only log at VERBOSE level — UART blocking on Core 0 causes dropouts.
+      // BitRate/SampleRate are still parsed below without logging.
+      ESP_LOGV(TAG, "info: %s", msg.msg);
       if (msg.msg && strncmp(msg.msg, "BitRate:", 8) == 0) {
         long br = atol(msg.msg + 8);
         if (br > 0) {
@@ -438,9 +464,11 @@ void InternetRadio::audio_callback(Audio::msg_t msg) {
       ESP_LOGD(TAG, "id3: %s", msg.msg);
       if (msg.msg) {
         if (strncmp(msg.msg, "Title: ", 7) == 0) {
-          int wi = 1 - self->title_read_idx_;
-          strlcpy(self->title_bufs_[wi], msg.msg + 7, 128);
-          self->title_read_idx_ = wi;
+          strlcpy(self->id3_title_, msg.msg + 7, sizeof(self->id3_title_));
+          self->update_id3_song_title_();
+        } else if (strncmp(msg.msg, "Artist: ", 8) == 0) {
+          strlcpy(self->id3_artist_, msg.msg + 8, sizeof(self->id3_artist_));
+          self->update_id3_song_title_();
         }
       }
       break;

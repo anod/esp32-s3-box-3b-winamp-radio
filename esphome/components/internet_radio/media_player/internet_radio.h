@@ -82,6 +82,7 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   void update_ha_state_();
   void mark_vol_dirty_();
   void flush_vol_if_dirty_();
+  void update_id3_song_title_();
 
   // Audio engine
   Audio audio_;
@@ -104,6 +105,10 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   volatile PlayState play_state_{PS_STOPPED};
   volatile long bitrate_{0};
   volatile bool is_muted_{false};
+
+  // ID3 artist/title buffers (written on Core 0, combined into title_bufs_)
+  char id3_artist_[64]{};
+  char id3_title_[64]{};
 
   // Double-buffered song title: Core 0 writes to write buf, then flips index.
   // Core 1 reads from read buf. Avoids torn reads without mutex.
