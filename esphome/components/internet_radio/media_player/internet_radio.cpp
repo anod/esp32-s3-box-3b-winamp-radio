@@ -145,8 +145,6 @@ media_player::MediaPlayerTraits InternetRadio::get_traits() {
       media_player::MediaPlayerEntityFeature::VOLUME_SET |
       media_player::MediaPlayerEntityFeature::VOLUME_MUTE |
       media_player::MediaPlayerEntityFeature::VOLUME_STEP |
-      media_player::MediaPlayerEntityFeature::NEXT_TRACK |
-      media_player::MediaPlayerEntityFeature::PREVIOUS_TRACK |
       media_player::MediaPlayerEntityFeature::PLAY_MEDIA);
   return traits;
 }

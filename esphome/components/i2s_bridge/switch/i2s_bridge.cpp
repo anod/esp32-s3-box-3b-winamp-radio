@@ -19,12 +19,16 @@ i2s_chan_handle_t I2SBridge::get_tx_handle() { return tx_handle_; }
 bool I2SBridge::is_active() { return active_; }
 
 void I2SBridge::setup() {
-  // Restore previous state
-  bool initial_state = false;
-  // Start disabled by default — user toggles via HA
-  this->publish_state(initial_state);
-  if (initial_state) {
-    this->init_i2s_();
+  bool restored;
+  if (this->get_initial_state_with_restore_mode().has_value()) {
+    restored = *this->get_initial_state_with_restore_mode();
+  } else {
+    restored = false;
+  }
+  if (restored) {
+    this->write_state(true);
+  } else {
+    this->publish_state(false);
   }
 }
 

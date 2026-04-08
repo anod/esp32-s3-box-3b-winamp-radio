@@ -58,6 +58,9 @@ class InternetRadio : public media_player::MediaPlayer, public Component {
   static constexpr int get_num_stations() { return NUM_STATIONS; }
   static const char *get_station_name_at(int idx) { return (idx >= 0 && idx < NUM_STATIONS) ? stations_[idx].name : ""; }
 
+  void next_station_();
+  void prev_station_();
+
  protected:
   void control(const media_player::MediaPlayerCall &call) override;
 
@@ -72,8 +75,6 @@ class InternetRadio : public media_player::MediaPlayer, public Component {
 
   void connect_station_();
   void update_ha_state_();
-  void next_station_();
-  void prev_station_();
 
   // Audio engine
   Audio audio_;
