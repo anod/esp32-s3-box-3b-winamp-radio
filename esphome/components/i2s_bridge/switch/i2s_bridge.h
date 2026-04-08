@@ -13,7 +13,7 @@
 namespace esphome {
 namespace i2s_bridge {
 
-class I2SBridge : public switch_::Switch, public Component {
+class I2SBridge final : public switch_::Switch, public Component {
  public:
   float get_setup_priority() const override { return setup_priority::LATE - 1; }
   void setup() override;

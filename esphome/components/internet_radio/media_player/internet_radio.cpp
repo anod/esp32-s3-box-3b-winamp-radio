@@ -105,9 +105,19 @@ void InternetRadio::loop() {
     }
   }
 
-  // Publish state changes to HA
+  // Non-blocking PA enable (replaces 200ms blocking delay)
+  if (this->pa_pending_ && (millis() - this->pa_pending_ms_ >= 200)) {
+    this->pa_pending_ = false;
+    digitalWrite(this->pa_pin_, HIGH);
+  }
+
+  // Debounced NVS volume save
+  this->flush_vol_if_dirty_();
+
+  // Publish state changes to HA (reads from stable title buffer)
+  const char *title = this->title_bufs_[this->title_read_idx_];
   if (this->play_state_ != this->last_published_state_ ||
-      strcmp(this->song_title_, this->last_published_title_) != 0) {
+      strcmp(title, this->last_published_title_) != 0) {
     this->update_ha_state_();
   }
 }
@@ -127,7 +137,7 @@ void InternetRadio::audio_task(void *param) {
     }
     if (self->pending_connect_) {
       self->pending_connect_ = false;
-      self->audio_.connecttohost(self->stations_[self->current_station_].url);
+      self->audio_.connecttohost(self->pending_url_);
     }
     self->audio_.loop();
     vTaskDelay(1);
@@ -160,9 +170,7 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
     // setVolume is safe to call cross-core
     this->audio_.setVolume(this->vol_);
     this->volume = v;
-    // Save to NVS
-    int save_vol = this->vol_;
-    this->volume_pref_.save(&save_vol);
+    this->mark_vol_dirty_();
     ESP_LOGD(TAG, "Volume: %d (%.0f%%)", (int)this->vol_, v * 100);
   }
 
@@ -221,8 +229,7 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
         this->vol_ = v;
         this->audio_.setVolume(v);
         this->volume = (float)v / 21.0f;
-        int save_vol = v;
-        this->volume_pref_.save(&save_vol);
+        this->mark_vol_dirty_();
         break;
       }
 
@@ -232,8 +239,7 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
         this->vol_ = v;
         this->audio_.setVolume(v);
         this->volume = (float)v / 21.0f;
-        int save_vol = v;
-        this->volume_pref_.save(&save_vol);
+        this->mark_vol_dirty_();
         break;
       }
 
@@ -274,13 +280,19 @@ void InternetRadio::connect_station_() {
            (int)this->current_station_,
            stations_[this->current_station_].name,
            stations_[this->current_station_].url);
-  strlcpy(this->song_title_, "Connecting...", sizeof(this->song_title_));
+  // Copy URL before setting flag — eliminates ordering race with Core 0
+  strlcpy(this->pending_url_, stations_[this->current_station_].url,
+          sizeof(this->pending_url_));
+  // Write title to the buffer Core 0 isn't reading
+  int write_idx = 1 - this->title_read_idx_;
+  strlcpy(this->title_bufs_[write_idx], "Connecting...", 128);
+  this->title_read_idx_ = write_idx;
   this->play_state_ = PS_PLAYING;
   this->pending_connect_ = true;
-  // Enable PA only when NOT routing to BT bridge
+  // Non-blocking PA enable — schedule for 200ms from now
   if (this->pa_pin_ >= 0 && !i2s_bridge::I2SBridge::is_active()) {
-    delay(200);
-    digitalWrite(this->pa_pin_, HIGH);
+    this->pa_pending_ms_ = millis();
+    this->pa_pending_ = true;
   }
 }
 
@@ -315,6 +327,7 @@ void InternetRadio::set_volume_direct(int vol) {
   this->audio_.setVolume(vol);
   this->volume = (float)vol / 21.0f;
   this->is_muted_ = (vol == 0);
+  this->mark_vol_dirty_();
   this->publish_state();
 }
 
@@ -334,7 +347,22 @@ void InternetRadio::update_ha_state_() {
   this->volume = (float)this->vol_ / 21.0f;
   this->publish_state();
   this->last_published_state_ = this->play_state_;
-  strlcpy(this->last_published_title_, this->song_title_, sizeof(this->last_published_title_));
+  const char *title = this->title_bufs_[this->title_read_idx_];
+  strlcpy(this->last_published_title_, title, sizeof(this->last_published_title_));
+}
+
+void InternetRadio::mark_vol_dirty_() {
+  this->vol_dirty_ = true;
+  this->vol_dirty_ms_ = millis();
+}
+
+void InternetRadio::flush_vol_if_dirty_() {
+  if (this->vol_dirty_ && (millis() - this->vol_dirty_ms_ >= NVS_SAVE_DEBOUNCE_MS)) {
+    this->vol_dirty_ = false;
+    int save_vol = this->vol_;
+    this->volume_pref_.save(&save_vol);
+    ESP_LOGD(TAG, "NVS: saved volume=%d", save_vol);
+  }
 }
 
 // ─── Audio callbacks (runs on Core 0) ─────────────────────
@@ -363,16 +391,22 @@ void InternetRadio::audio_callback(Audio::msg_t msg) {
     case Audio::evt_streamtitle:
       ESP_LOGI(TAG, "title: %s", msg.msg);
       if (msg.msg && msg.msg[0] != '\0') {
-        strlcpy(self->song_title_, msg.msg, sizeof(self->song_title_));
+        int wi = 1 - self->title_read_idx_;
+        strlcpy(self->title_bufs_[wi], msg.msg, 128);
+        self->title_read_idx_ = wi;
       }
       break;
 
     case Audio::evt_name:
       ESP_LOGI(TAG, "station: %s", msg.msg);
       self->play_state_ = PS_PLAYING;
-      if (self->song_title_[0] == '\0' ||
-          strcmp(self->song_title_, "Connecting...") == 0) {
-        strlcpy(self->song_title_, msg.msg, sizeof(self->song_title_));
+      {
+        const char *cur = self->title_bufs_[self->title_read_idx_];
+        if (cur[0] == '\0' || strcmp(cur, "Connecting...") == 0) {
+          int wi = 1 - self->title_read_idx_;
+          strlcpy(self->title_bufs_[wi], msg.msg, 128);
+          self->title_read_idx_ = wi;
+        }
       }
       break;
 
@@ -380,7 +414,9 @@ void InternetRadio::audio_callback(Audio::msg_t msg) {
       ESP_LOGD(TAG, "id3: %s", msg.msg);
       if (msg.msg) {
         if (strncmp(msg.msg, "Title: ", 7) == 0) {
-          strlcpy(self->song_title_, msg.msg + 7, sizeof(self->song_title_));
+          int wi = 1 - self->title_read_idx_;
+          strlcpy(self->title_bufs_[wi], msg.msg + 7, 128);
+          self->title_read_idx_ = wi;
         }
       }
       break;

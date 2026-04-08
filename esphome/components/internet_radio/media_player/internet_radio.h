@@ -27,7 +27,7 @@ struct Station {
 // Playback state (mirrors current firmware)
 enum PlayState : int { PS_STOPPED = 0, PS_PLAYING = 1, PS_PAUSED = 2 };
 
-class InternetRadio : public media_player::MediaPlayer, public Component {
+class InternetRadio final : public media_player::MediaPlayer, public Component {
  public:
   float get_setup_priority() const override { return setup_priority::LATE; }
   void setup() override;
@@ -49,7 +49,7 @@ class InternetRadio : public media_player::MediaPlayer, public Component {
   Audio &get_audio() { return this->audio_; }
   volatile PlayState &get_play_state() { return this->play_state_; }
   int get_current_station() const { return this->current_station_; }
-  const char *get_song_title() const { return this->song_title_; }
+  const char *get_song_title() const { return this->title_bufs_[this->title_read_idx_]; }
   const char *get_station_name() const { return stations_[this->current_station_].name; }
   long get_bitrate() const { return this->bitrate_; }
   int get_vol() const { return this->vol_; }
@@ -80,6 +80,8 @@ class InternetRadio : public media_player::MediaPlayer, public Component {
 
   void connect_station_();
   void update_ha_state_();
+  void mark_vol_dirty_();
+  void flush_vol_if_dirty_();
 
   // Audio engine
   Audio audio_;
@@ -102,12 +104,21 @@ class InternetRadio : public media_player::MediaPlayer, public Component {
   volatile PlayState play_state_{PS_STOPPED};
   volatile long bitrate_{0};
   volatile bool is_muted_{false};
-  char song_title_[128]{};
+
+  // Double-buffered song title: Core 0 writes to write buf, then flips index.
+  // Core 1 reads from read buf. Avoids torn reads without mutex.
+  char title_bufs_[2][128]{};
+  volatile int title_read_idx_{0};  // index Core 1 reads from
 
   // Cross-core pending flags (set on Core 1, consumed on Core 0)
   volatile bool pending_connect_{false};
   volatile bool pending_pause_{false};
   volatile bool pending_stop_{false};
+  char pending_url_[256]{};  // URL copied before setting pending_connect_
+
+  // Non-blocking PA enable (avoids 200ms delay in main loop)
+  unsigned long pa_pending_ms_{0};
+  bool pa_pending_{false};
 
   // WiFi / stream lifecycle
   bool wifi_connected_{false};
@@ -115,6 +126,11 @@ class InternetRadio : public media_player::MediaPlayer, public Component {
   volatile bool stream_failed_{false};
   unsigned long last_retry_ms_{0};
   static constexpr unsigned long RETRY_INTERVAL_MS = 5000;
+
+  // Debounced NVS saves (prevents flash wear from rapid volume changes)
+  bool vol_dirty_{false};
+  unsigned long vol_dirty_ms_{0};
+  static constexpr unsigned long NVS_SAVE_DEBOUNCE_MS = 3000;
 
   // State change detection for HA publishing
   PlayState last_published_state_{PS_STOPPED};

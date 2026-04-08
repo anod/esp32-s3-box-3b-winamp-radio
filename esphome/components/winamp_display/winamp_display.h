@@ -25,7 +25,7 @@ class I2SBridge;
 namespace esphome {
 namespace winamp_display {
 
-class WinampDisplay : public Component, public i2c::I2CDevice {
+class WinampDisplay final : public Component, public i2c::I2CDevice {
  public:
   float get_setup_priority() const override {
     // Run after InternetRadio (LATE) and I2SBridge (LATE-1)
