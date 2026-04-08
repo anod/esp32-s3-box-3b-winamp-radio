@@ -299,6 +299,14 @@ void InternetRadio::prev_station_() {
   this->connect_station_();
 }
 
+void InternetRadio::set_station(int idx) {
+  if (idx < 0 || idx >= NUM_STATIONS || idx == this->current_station_) return;
+  this->current_station_ = idx;
+  int save_sta = idx;
+  this->station_pref_.save(&save_sta);
+  this->connect_station_();
+}
+
 void InternetRadio::update_ha_state_() {
   switch (this->play_state_) {
     case PS_PLAYING:

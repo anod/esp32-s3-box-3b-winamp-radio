@@ -87,3 +87,47 @@ switch:
     lrck_pin: 14
     dout_pin: 11
     pa_pin: 46
+
+# --- HA Entities (song title + station picker) ---
+
+text_sensor:
+  - platform: template
+    name: "Now Playing"
+    id: now_playing
+    icon: "mdi:music-note"
+    update_interval: 3s
+    lambda: |-
+      return std::string(id(radio).get_song_title());
+
+select:
+  - platform: template
+    name: "Station"
+    id: station_select
+    icon: "mdi:radio"
+    options:
+      - "Groove Salad"
+      - "Enigmatic Station 1"
+      - "Psytrance"
+      - "Rock Antenne"
+      - "181 Hard Rock"
+      - "Heavy Metal"
+      - "181 Power Hits"
+      - "KROQ"
+      - "BBC World News"
+      - "NPR News"
+    set_action:
+      - lambda: |-
+          const auto &opts = id(station_select).traits.get_options();
+          for (int i = 0; i < (int)opts.size(); i++) {
+            if (opts[i] == x) {
+              id(radio).set_station(i);
+              break;
+            }
+          }
+    lambda: |-
+      int idx = id(radio).get_current_station();
+      const auto &opts = id(station_select).traits.get_options();
+      if (idx >= 0 && idx < (int)opts.size())
+        return opts[idx];
+      return std::string("Unknown");
+    update_interval: 3s

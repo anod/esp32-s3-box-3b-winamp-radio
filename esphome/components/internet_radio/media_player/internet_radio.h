@@ -45,12 +45,18 @@ class InternetRadio : public media_player::MediaPlayer, public Component {
   void set_pa_pin(int pin) { this->pa_pin_ = pin; }
   void set_default_volume(int vol) { this->default_volume_ = vol; }
 
-  // Public accessors for bridge component
+  // Public accessors for bridge component and template entities
   Audio &get_audio() { return this->audio_; }
   volatile PlayState &get_play_state() { return this->play_state_; }
   int get_current_station() const { return this->current_station_; }
   const char *get_song_title() const { return this->song_title_; }
+  const char *get_station_name() const { return stations_[this->current_station_].name; }
   long get_bitrate() const { return this->bitrate_; }
+
+  // Station control (for select entity)
+  void set_station(int idx);
+  static constexpr int get_num_stations() { return NUM_STATIONS; }
+  static const char *get_station_name_at(int idx) { return (idx >= 0 && idx < NUM_STATIONS) ? stations_[idx].name : ""; }
 
  protected:
   void control(const media_player::MediaPlayerCall &call) override;
