@@ -4,6 +4,7 @@
 #include "esphome/components/wifi/wifi_component.h"
 #include "esphome/components/network/util.h"
 #include "esphome/components/network/ip_address.h"
+#include <math.h>
 
 namespace esphome {
 namespace winamp_display {
@@ -88,6 +89,9 @@ void WinampDisplay::setup() {
   for (int i = 0; i < MAX_SEGS; i++) {
     this->seg_colors_[i] = gradient_color_565((float)i / (MAX_SEGS - 1));
   }
+
+  // Initialize FFT tables (must happen before audio starts streaming)
+  spectrum_init();
 
   // Initial draw
   this->draw_frame_();
@@ -370,6 +374,35 @@ void WinampDisplay::draw_frame_() {
   // ── Visualizer panel (drawn into canvas — no separate sprite push) ──
   c.fillRect(VIZ_X, VIZ_Y, VIZ_W, VIZ_H, this->c_panel_);
   c.drawRect(VIZ_X, VIZ_Y, VIZ_W, VIZ_H, this->c_border_);
+
+  if (wifi_connected) {
+    // Smooth spectrum bars: fast attack (0.6), slow decay (0.15)
+    for (int i = 0; i < VIZ_BANDS; i++) {
+      float target = spec_bands[i];
+      target = (target > 100.0f) ? (log10f(target) - 2.0f) * 1.3f : 0.0f;
+      if (target > 5.0f) target = 5.0f;
+      if (target < 0.0f) target = 0.0f;
+      if (target > this->display_bars_[i])
+        this->display_bars_[i] += (target - this->display_bars_[i]) * 0.6f;
+      else
+        this->display_bars_[i] += (target - this->display_bars_[i]) * 0.15f;
+    }
+
+    int bar_w = 5, gap = 2;
+    int total_w = VIZ_BANDS * bar_w + (VIZ_BANDS - 1) * gap;
+    int start_x = VIZ_X + (VIZ_W - total_w) / 2;
+    int seg_step = SEG_H + SEG_GAP;
+    int base_y = VIZ_Y + VIZ_H - 3;
+    for (int i = 0; i < VIZ_BANDS; i++) {
+      int num_segs = (int)(this->display_bars_[i] * (MAX_SEGS / 5.0f) + 0.5f);
+      if (num_segs > MAX_SEGS) num_segs = MAX_SEGS;
+      int bx = start_x + i * (bar_w + gap);
+      for (int s = 0; s < num_segs; s++) {
+        int sy = base_y - (s + 1) * seg_step + SEG_GAP;
+        c.fillRect(bx, sy, bar_w, SEG_H, this->seg_colors_[s]);
+      }
+    }
+  }
 
   // Outer frame
   c.drawRect(0, 0, 320, CANVAS_H, this->c_border_);

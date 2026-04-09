@@ -13,6 +13,10 @@
 // LGFX_USE_V1 and LGFX_AUTODETECT are set via build flags
 #include <LovyanGFX.hpp>
 
+// Spectrum analyser (implemented in spectrum.cpp, runs on Core 0)
+extern volatile float spec_bands[16];
+void spectrum_init();
+
 // Forward declarations to avoid including full headers
 namespace esphome {
 namespace internet_radio {
