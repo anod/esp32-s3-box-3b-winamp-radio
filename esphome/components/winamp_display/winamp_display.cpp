@@ -376,10 +376,15 @@ void WinampDisplay::draw_frame_() {
   c.drawRect(VIZ_X, VIZ_Y, VIZ_W, VIZ_H, this->c_border_);
 
   if (wifi_connected) {
+    // Run FFT on Core 1 (zero overhead on audio core)
+    spectrum_compute();
+
     // Smooth spectrum bars: fast attack (0.6), slow decay (0.15)
+    // spec_bands contains magnitude² — log10 scaling adjusted accordingly
     for (int i = 0; i < VIZ_BANDS; i++) {
       float target = spec_bands[i];
-      target = (target > 100.0f) ? (log10f(target) - 2.0f) * 1.3f : 0.0f;
+      // magnitude² threshold: 10000 (= 100²), scale by 0.65 (half of 1.3 for sqrt)
+      target = (target > 10000.0f) ? (log10f(target) - 4.0f) * 0.65f : 0.0f;
       if (target > 5.0f) target = 5.0f;
       if (target < 0.0f) target = 0.0f;
       if (target > this->display_bars_[i])

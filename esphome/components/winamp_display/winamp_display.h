@@ -13,9 +13,10 @@
 // LGFX_USE_V1 and LGFX_AUTODETECT are set via build flags
 #include <LovyanGFX.hpp>
 
-// Spectrum analyser (implemented in spectrum.cpp, runs on Core 0)
-extern volatile float spec_bands[16];
+// Spectrum analyser — Core 0 captures samples, Core 1 runs FFT
+extern float spec_bands[16];
 void spectrum_init();
+bool spectrum_compute();  // call from draw_frame_ before reading spec_bands
 
 // Forward declarations to avoid including full headers
 namespace esphome {

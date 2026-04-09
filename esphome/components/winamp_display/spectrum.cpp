@@ -1,5 +1,7 @@
 // ─── FFT spectrum analyser ────────────────────────────────
-// Runs on Core 0 via the audio_process_raw_samples weak callback.
+// Core 0 callback only accumulates mono samples (very lightweight).
+// Core 1 runs the FFT in draw_frame_() — no audio-path overhead.
+//
 // This file must NOT include Audio.h — the weak attribute would
 // taint our strong definition (same rule as audio_process_i2s.cpp).
 //
@@ -13,17 +15,23 @@
 static constexpr int FFT_N = 128;
 static constexpr int VIZ_BANDS = 16;
 
-// FFT working buffers (~2KB total, all internal RAM)
+// ── Core 0 side: lightweight sample capture ──
+// Double-buffered: Core 0 writes to buf[write_buf_], flips when full.
+// Core 1 reads buf[1 - write_buf_] (the completed buffer).
+static float sample_bufs[2][FFT_N];
+static volatile int write_buf_ = 0;     // which buffer Core 0 is filling
+static int accum_idx = 0;
+static volatile bool sample_ready = false;   // true when a full buffer is available
+static volatile bool spectrum_ready = false; // init guard
+
+// ── Core 1 side: FFT computation ──
 static float fft_input[FFT_N * 2];    // interleaved Re/Im
 static float fft_window[FFT_N];       // pre-computed Hann window
 static float fft_twiddle[FFT_N];      // pre-computed twiddle factors (cos)
 static float fft_twiddle_s[FFT_N];    // pre-computed twiddle factors (sin)
-static float sample_accum[FFT_N];     // mono sample accumulator
-static int accum_idx = 0;
-static volatile bool spectrum_ready = false;  // init guard
 
-// Shared output: written by Core 0, read by Core 1
-volatile float spec_bands[VIZ_BANDS] = {0};
+// Output bands: written by Core 1 in spectrum_compute(), read by Core 1 draw
+float spec_bands[VIZ_BANDS] = {0};
 
 // Logarithmic bin mapping: 128-point FFT at 44100Hz → ~345Hz/bin
 // Maps bins 1-48 (~345Hz–16.5kHz)
@@ -66,31 +74,7 @@ static void fft_radix2(float *data, int n) {
   }
 }
 
-static void process_fft() {
-  for (int i = 0; i < FFT_N; i++) {
-    fft_input[i * 2]     = sample_accum[i] * fft_window[i];
-    fft_input[i * 2 + 1] = 0.0f;
-  }
-
-  fft_radix2(fft_input, FFT_N);
-
-  // Aggregate FFT bins into 16 logarithmic frequency bands
-  for (int b = 0; b < VIZ_BANDS; b++) {
-    float sum = 0.0f;
-    for (int i = band_bin_start[b]; i <= band_bin_end[b]; i++) {
-      float re = fft_input[i * 2];
-      float im = fft_input[i * 2 + 1];
-      sum += sqrtf(re * re + im * im);
-    }
-    int bin_count = band_bin_end[b] - band_bin_start[b] + 1;
-    spec_bands[b] = sum / (float)bin_count;
-  }
-}
-
 // Call once before audio starts — pre-compute Hann window and twiddle factors.
-// Setup priority: WinampDisplay (LATE-2) runs after InternetRadio (LATE),
-// but audio task won't stream until WiFi connects (checked in loop()).
-// Guard with spectrum_ready flag for safety.
 void spectrum_init() {
   for (int i = 0; i < FFT_N; i++) {
     fft_window[i] = 0.5f * (1.0f - cosf(2.0f * (float)M_PI * i / (FFT_N - 1)));
@@ -101,20 +85,54 @@ void spectrum_init() {
   spectrum_ready = true;
 }
 
+// Called from Core 1 (draw_frame_) — runs FFT on latest completed sample buffer.
+// Returns true if new data was computed.
+bool spectrum_compute() {
+  if (!sample_ready) return false;
+  sample_ready = false;
+
+  // Read the completed buffer (the one Core 0 is NOT writing to)
+  int read_buf = 1 - write_buf_;
+  for (int i = 0; i < FFT_N; i++) {
+    fft_input[i * 2]     = sample_bufs[read_buf][i] * fft_window[i];
+    fft_input[i * 2 + 1] = 0.0f;
+  }
+
+  fft_radix2(fft_input, FFT_N);
+
+  // Aggregate FFT bins into 16 logarithmic frequency bands (magnitude²)
+  for (int b = 0; b < VIZ_BANDS; b++) {
+    float sum = 0.0f;
+    for (int i = band_bin_start[b]; i <= band_bin_end[b]; i++) {
+      float re = fft_input[i * 2];
+      float im = fft_input[i * 2 + 1];
+      sum += re * re + im * im;
+    }
+    int bin_count = band_bin_end[b] - band_bin_start[b] + 1;
+    spec_bands[b] = sum / (float)bin_count;
+  }
+  return true;
+}
+
 // Strong override of the library's weak callback (called on Core 0).
 // C++ linkage to match Audio.h declaration — no extern "C".
+// Only accumulates mono samples — zero FFT work on audio core.
 void audio_process_raw_samples(int32_t *outBuff, int16_t validSamples) {
   if (!spectrum_ready) return;
 
+  float *buf = sample_bufs[write_buf_];
   for (int i = 0; i < validSamples; i++) {
     // Mix stereo to mono — samples are 16-bit values in int32 containers
     float l = (float)(outBuff[i * 2] >> 16);
     float r = (float)(outBuff[i * 2 + 1] >> 16);
-    sample_accum[accum_idx] = (l + r) * 0.5f;
+    buf[accum_idx] = (l + r) * 0.5f;
 
     if (++accum_idx >= FFT_N) {
-      process_fft();
+      // Buffer full — flip to other buffer, signal Core 1
+      write_buf_ = 1 - write_buf_;
+      buf = sample_bufs[write_buf_];
       accum_idx = 0;
+      sample_ready = true;
     }
   }
 }
