@@ -20,7 +20,7 @@ static constexpr int VIZ_BANDS = 16;
 // Core 1 reads buf[1 - write_buf_] (the completed buffer).
 static float sample_bufs[2][FFT_N];
 static volatile int write_buf_ = 0;     // which buffer Core 0 is filling
-static int accum_idx = 0;
+static volatile int accum_idx = 0;
 static volatile bool sample_ready = false;   // true when a full buffer is available
 static volatile bool spectrum_ready = false; // init guard
 
@@ -128,11 +128,11 @@ void audio_process_raw_samples(int32_t *outBuff, int16_t validSamples) {
     buf[accum_idx] = (l + r) * 0.5f;
 
     if (++accum_idx >= FFT_N) {
-      // Buffer full — flip to other buffer, signal Core 1
+      // Buffer full — reset index BEFORE flip so Core 1 never sees stale state
+      accum_idx = 0;
       write_buf_ = 1 - write_buf_;
       buf = sample_bufs[write_buf_];
-      accum_idx = 0;
-      sample_ready = true;
+      sample_ready = true;  // signal Core 1 last
     }
   }
 }
