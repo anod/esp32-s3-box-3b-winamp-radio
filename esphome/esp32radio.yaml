@@ -40,9 +40,6 @@ ota:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
-  ap:
-    ssid: "ESP32Radio-AP"
-    password: !secret ap_password
 
 i2c:
   sda: GPIO8
@@ -73,6 +70,9 @@ media_player:
     pa_pin: 46
     # Default volume (0-21)
     default_volume: 15
+    # HA entity references (publish-on-change from C++)
+    now_playing_id: now_playing
+    station_select_id: station_select
 
 switch:
   - platform: i2s_bridge
@@ -91,6 +91,7 @@ winamp_display:
   radio_id: radio
   bridge_id: bt_speaker
   brightness: 160
+  brightness_number_id: screen_brightness
 
 # --- Hardware Buttons ---
 
@@ -143,9 +144,7 @@ text_sensor:
     name: "Now Playing"
     id: now_playing
     icon: "mdi:music-note"
-    update_interval: 3s
-    lambda: |-
-      return std::string(id(radio).get_song_title());
+    update_interval: never
 
 select:
   - platform: template
@@ -172,13 +171,7 @@ select:
               break;
             }
           }
-    lambda: |-
-      int idx = id(radio).get_current_station();
-      const auto &opts = id(station_select).traits.get_options();
-      if (idx >= 0 && idx < (int)opts.size())
-        return opts[idx];
-      return std::string("Unknown");
-    update_interval: 3s
+    update_interval: never
 
 number:
   - platform: template
@@ -190,5 +183,4 @@ number:
     step: 1
     set_action:
       - lambda: id(display).set_brightness((int)x);
-    lambda: return (float)id(display).get_brightness();
-    update_interval: 3s
+    update_interval: never

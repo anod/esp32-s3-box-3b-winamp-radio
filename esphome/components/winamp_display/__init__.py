@@ -2,7 +2,7 @@ import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.const import CONF_ID
 from esphome.components.esp32 import include_builtin_idf_component
-from esphome.components import i2c
+from esphome.components import i2c, number
 
 CODEOWNERS = ["@alexg"]
 DEPENDENCIES = ["i2c"]
@@ -15,6 +15,7 @@ WinampDisplay = winamp_display_ns.class_(
 CONF_RADIO_ID = "radio_id"
 CONF_BRIDGE_ID = "bridge_id"
 CONF_BRIGHTNESS = "brightness"
+CONF_BRIGHTNESS_NUMBER = "brightness_number_id"
 
 # Import the classes we reference
 internet_radio_ns = cg.esphome_ns.namespace("internet_radio")
@@ -30,6 +31,7 @@ CONFIG_SCHEMA = (
             cv.Required(CONF_RADIO_ID): cv.use_id(InternetRadio),
             cv.Required(CONF_BRIDGE_ID): cv.use_id(I2SBridge),
             cv.Optional(CONF_BRIGHTNESS, default=160): cv.int_range(min=1, max=255),
+            cv.Optional(CONF_BRIGHTNESS_NUMBER): cv.use_id(number.Number),
         }
     )
     .extend(cv.COMPONENT_SCHEMA)
@@ -49,6 +51,10 @@ async def to_code(config):
     cg.add(var.set_bridge(bridge))
 
     cg.add(var.set_brightness(config[CONF_BRIGHTNESS]))
+
+    if CONF_BRIGHTNESS_NUMBER in config:
+        num = await cg.get_variable(config[CONF_BRIGHTNESS_NUMBER])
+        cg.add(var.set_brightness_number(num))
 
     # LovyanGFX library
     cg.add_library("lovyan03/LovyanGFX", "1.2.19")

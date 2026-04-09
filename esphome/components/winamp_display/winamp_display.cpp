@@ -104,12 +104,7 @@ constexpr uint8_t WinampDisplay::BRIGHTNESS_LEVELS[];
 
 void WinampDisplay::cycle_brightness() {
   this->brightness_idx_ = (this->brightness_idx_ + 1) % NUM_BRIGHTNESS;
-  this->brightness_ = BRIGHTNESS_LEVELS[this->brightness_idx_];
-  this->screen_on_ = true;
-  this->tft_.setBrightness(this->brightness_);
-  this->brightness_dirty_ = true;
-  this->brightness_dirty_ms_ = millis();
-  ESP_LOGD(TAG, "Brightness: %d", this->brightness_);
+  this->set_brightness(BRIGHTNESS_LEVELS[this->brightness_idx_]);
 }
 
 void WinampDisplay::loop() {

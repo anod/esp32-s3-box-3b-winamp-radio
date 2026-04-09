@@ -9,6 +9,7 @@
 #include "esphome/core/component.h"
 #include "esphome/core/preferences.h"
 #include "esphome/components/i2c/i2c.h"
+#include "esphome/components/number/number.h"
 
 // LGFX_USE_V1 and LGFX_AUTODETECT are set via build flags
 #include <LovyanGFX.hpp>
@@ -43,6 +44,7 @@ class WinampDisplay final : public Component, public i2c::I2CDevice {
   // Config setters (called by codegen)
   void set_radio(internet_radio::InternetRadio *radio) { this->radio_ = radio; }
   void set_bridge(i2s_bridge::I2SBridge *bridge) { this->bridge_ = bridge; }
+  void set_brightness_number(number::Number *n) { this->brightness_number_ = n; }
   void set_brightness(int brightness) {
     if (brightness < 1) brightness = 1;
     if (brightness > 255) brightness = 255;
@@ -57,6 +59,7 @@ class WinampDisplay final : public Component, public i2c::I2CDevice {
           abs(brightness - BRIGHTNESS_LEVELS[this->brightness_idx_]))
         this->brightness_idx_ = i;
     }
+    this->publish_brightness_();
   }
   void cycle_brightness();
   int get_brightness() const { return this->brightness_; }
@@ -70,6 +73,12 @@ class WinampDisplay final : public Component, public i2c::I2CDevice {
   void handle_touch_();
   bool read_gt911_home_button_();
 
+  // Publish brightness to HA number entity
+  void publish_brightness_() {
+    if (this->brightness_number_)
+      this->brightness_number_->publish_state((float)this->brightness_);
+  }
+
   // Winamp button drawing helper
   void draw_wa_btn_(int x, int y, int w, int h, bool pressed,
                     const char *label, int indicator = -1);
@@ -77,6 +86,7 @@ class WinampDisplay final : public Component, public i2c::I2CDevice {
   // Component references
   internet_radio::InternetRadio *radio_{nullptr};
   i2s_bridge::I2SBridge *bridge_{nullptr};
+  number::Number *brightness_number_{nullptr};
 
   // Display
   LGFX tft_;

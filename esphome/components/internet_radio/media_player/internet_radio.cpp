@@ -117,9 +117,12 @@ void InternetRadio::loop() {
 
   // Publish state changes to HA (reads from stable title buffer)
   const char *title = this->title_bufs_[this->title_read_idx_];
-  if (this->play_state_ != this->last_published_state_ ||
-      strcmp(title, this->last_published_title_) != 0) {
+  bool title_changed = strcmp(title, this->last_published_title_) != 0;
+  if (this->play_state_ != this->last_published_state_ || title_changed) {
     this->update_ha_state_();
+  }
+  if (title_changed && this->now_playing_sensor_) {
+    this->now_playing_sensor_->publish_state(title);
   }
 }
 
@@ -331,6 +334,7 @@ void InternetRadio::next_station_() {
   int save_sta = sta;
   this->station_pref_.save(&save_sta);
   this->connect_station_();
+  this->publish_station_select_();
 }
 
 void InternetRadio::prev_station_() {
@@ -339,6 +343,7 @@ void InternetRadio::prev_station_() {
   int save_sta = sta;
   this->station_pref_.save(&save_sta);
   this->connect_station_();
+  this->publish_station_select_();
 }
 
 void InternetRadio::set_station(int idx) {
@@ -347,6 +352,7 @@ void InternetRadio::set_station(int idx) {
   int save_sta = idx;
   this->station_pref_.save(&save_sta);
   this->connect_station_();
+  this->publish_station_select_();
 }
 
 void InternetRadio::set_volume_direct(int vol) {
@@ -391,6 +397,14 @@ void InternetRadio::flush_vol_if_dirty_() {
     int save_vol = this->vol_;
     this->volume_pref_.save(&save_vol);
     ESP_LOGD(TAG, "NVS: saved volume=%d", save_vol);
+  }
+}
+
+void InternetRadio::publish_station_select_() {
+  if (this->station_select_) {
+    int idx = this->current_station_;
+    if (idx >= 0 && idx < NUM_STATIONS)
+      this->station_select_->publish_state(stations_[idx].name);
   }
 }
 

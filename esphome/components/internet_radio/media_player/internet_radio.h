@@ -10,6 +10,8 @@
 #include "esphome/core/component.h"
 #include "esphome/core/preferences.h"
 #include "esphome/components/media_player/media_player.h"
+#include "esphome/components/text_sensor/text_sensor.h"
+#include "esphome/components/select/select.h"
 
 #include <Audio.h>
 #include <freertos/FreeRTOS.h>
@@ -44,6 +46,10 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   void set_i2s_mclk_pin(int pin) { this->mclk_pin_ = pin; }
   void set_pa_pin(int pin) { this->pa_pin_ = pin; }
   void set_default_volume(int vol) { this->default_volume_ = vol; }
+
+  // Optional HA entity references (for direct publish-on-change)
+  void set_now_playing_sensor(text_sensor::TextSensor *s) { this->now_playing_sensor_ = s; }
+  void set_station_select(select::Select *s) { this->station_select_ = s; }
 
   // Public accessors for bridge component and template entities
   Audio &get_audio() { return this->audio_; }
@@ -83,6 +89,7 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   void mark_vol_dirty_();
   void flush_vol_if_dirty_();
   void update_id3_song_title_();
+  void publish_station_select_();
 
   // Audio engine
   Audio audio_;
@@ -144,6 +151,10 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   // NVS
   ESPPreferenceObject volume_pref_;
   ESPPreferenceObject station_pref_;
+
+  // Optional HA entity references
+  text_sensor::TextSensor *now_playing_sensor_{nullptr};
+  select::Select *station_select_{nullptr};
 };
 
 }  // namespace internet_radio
