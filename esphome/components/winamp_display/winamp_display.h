@@ -43,7 +43,21 @@ class WinampDisplay final : public Component, public i2c::I2CDevice {
   // Config setters (called by codegen)
   void set_radio(internet_radio::InternetRadio *radio) { this->radio_ = radio; }
   void set_bridge(i2s_bridge::I2SBridge *bridge) { this->bridge_ = bridge; }
-  void set_brightness(int brightness) { this->brightness_ = brightness; }
+  void set_brightness(int brightness) {
+    if (brightness < 1) brightness = 1;
+    if (brightness > 255) brightness = 255;
+    this->brightness_ = brightness;
+    this->screen_on_ = true;
+    this->tft_.setBrightness(brightness);
+    this->brightness_dirty_ = true;
+    this->brightness_dirty_ms_ = millis();
+    // Sync preset index to closest level
+    for (int i = 0; i < NUM_BRIGHTNESS; i++) {
+      if (abs(brightness - BRIGHTNESS_LEVELS[i]) <
+          abs(brightness - BRIGHTNESS_LEVELS[this->brightness_idx_]))
+        this->brightness_idx_ = i;
+    }
+  }
   void cycle_brightness();
   int get_brightness() const { return this->brightness_; }
 

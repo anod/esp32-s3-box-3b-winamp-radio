@@ -179,3 +179,16 @@ select:
         return opts[idx];
       return std::string("Unknown");
     update_interval: 3s
+
+number:
+  - platform: template
+    name: "Screen Brightness"
+    id: screen_brightness
+    icon: "mdi:brightness-6"
+    min_value: 1
+    max_value: 255
+    step: 1
+    set_action:
+      - lambda: id(display).set_brightness((int)x);
+    lambda: return (float)id(display).get_brightness();
+    update_interval: 3s
