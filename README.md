@@ -1,58 +1,54 @@
 # ESP32-S3-BOX-3 Internet Radio
 
-Internet radio firmware for the [ESP32-S3-BOX-3](https://github.com/espressif/esp-box) (ESP32-S3, ILI9342C 320×240 display, ES8311 audio codec, GT911 touch). Streams internet radio stations with a retro-styled touch UI, optional Bluetooth speaker output, and Home Assistant integration.
-
-Based on [VolosR/WaveshareRadioStream](https://github.com/VolosR/WaveshareRadioStream), adapted for ESP32-S3-BOX-3 hardware.
+Internet radio for the [ESP32-S3-BOX-3](https://github.com/espressif/esp-box) built on ESPHome with custom external components. Streams internet radio stations with a Winamp 2 themed touch UI, real-time FFT spectrum visualizer, optional Bluetooth speaker output, and full Home Assistant integration.
 
 ## Features
 
 - 10 pre-configured internet radio stations (electronic, trance, rock, metal, pop, news)
 - Winamp 2 inspired UI: beveled buttons, grooved title bar, signal bars, state indicators
+- Real-time 16-band FFT spectrum visualizer (segmented gradient bars)
 - Touch screen station selection & volume control
-- Hardware buttons: Boot (cycle brightness), Mute (GPIO 1), Home (stop/play)
+- Hardware buttons: Boot (cycle brightness), Mute switch (GPIO 1), Home (stop/play)
 - Auto-dim screen when stopped, restore on play
-- Scrolling song title ticker with ID3/ICY metadata
-- Real FFT spectrum visualizer (Winamp 2 style segmented bars)
+- Scrolling song title ticker with ID3/ICY metadata (Artist - Title)
 - WiFi signal strength & bitrate display
 - Bluetooth speaker output via I2S bridge to ESP32-WROOM-32D
-- Home Assistant integration via MQTT (auto-discovery, media player entity)
-- Station, volume & output mode persisted across reboots
+- Home Assistant integration via ESPHome native API (media player, controls, sensors)
+- Station, volume, brightness & output mode persisted across reboots
+- OTA firmware updates
 
 ## Quick Start
 
-### 1. Install PlatformIO
+### 1. Install ESPHome
 
 ```bash
-pip install platformio
+pip install esphome
 ```
 
-Ensure `~/.local/bin` is on your PATH. The first build auto-downloads the toolchain (~1 GB).
-
-> **Important:** This project requires the [pioarduino](https://github.com/pioarduino/platform-espressif32) platform (Arduino core 3.x / ESP-IDF 5.x), already configured in `platformio.ini`.
-
-### 2. Configure WiFi & MQTT
+### 2. Configure Secrets
 
 ```bash
-cp .env.sample .env   # then edit with your SSID/password and optional MQTT settings
+cd esphome
+cp secrets.yaml.sample secrets.yaml  # edit with your WiFi/API credentials
+```
+
+`secrets.yaml` should contain:
+```yaml
+wifi_ssid: "YourSSID"
+wifi_password: "YourPassword"
+api_key: "your-api-encryption-key"
+ota_password: "your-ota-password"
 ```
 
 ### 3. Build & Flash
 
 ```bash
-pio run                # build only
-pio run -t upload      # build + flash
-pio device monitor     # serial monitor (115200 baud)
+cd esphome
+esphome compile esp32radio.yaml                          # build
+esphome upload esp32radio.yaml --device /dev/ttyACM0     # flash via USB
+esphome upload esp32radio.yaml                           # flash via OTA (after first USB flash)
+esphome logs esp32radio.yaml --device /dev/ttyACM0       # serial logs
 ```
-
-### 4. Run Tests
-
-```bash
-pio test -e native     # host-side unit tests (no hardware required)
-```
-
-### Arduino IDE (alternative)
-
-Install **esp32 by Espressif Systems** board package **v3.x** via Board Manager. Select board **ESP32-S3-BOX-3**, enable **USB CDC On Boot** and **OPI PSRAM**. Copy `.env` values into `include/config.h` manually (the `load_env.py` script is PlatformIO-only).
 
 ### WSL USB passthrough
 
@@ -76,22 +72,7 @@ In WSL, grant serial access once: `sudo usermod -aG dialout $USER` (re-login req
 | Touch BT SPEAKER   | Toggle Bluetooth/local speaker (green indicator = active) |
 | Home button (red ●)| Stop/play toggle               |
 | Boot button (GPIO0)| Cycle screen brightness        |
-| Mute button (GPIO1)| Toggle mute                    |
-
-## Configuration
-
-Settings can be overridden via `.env` (see `.env.sample`) or edited directly in `include/config.h`.
-
-| Option           | Default                | Description                    |
-|------------------|------------------------|--------------------------------|
-| `WIFI_SSID`      | —                      | WiFi network name              |
-| `WIFI_PASSWORD`   | —                      | WiFi password                  |
-| `DEFAULT_VOLUME`  | `15`                   | Initial volume (0–21)          |
-| `MAX_VOLUME`      | `21`                   | Maximum volume level           |
-| `MQTT_BROKER`     | `homeassistant.local`  | MQTT broker hostname           |
-| `MQTT_PORT`       | `1883`                 | MQTT broker port               |
-| `MQTT_USER`       | (empty)                | MQTT username (optional)       |
-| `MQTT_PASSWORD`   | (empty)                | MQTT password (optional)       |
+| Mute switch (GPIO1)| Toggle mute                    |
 
 ## Hardware — ESP32-S3-BOX-3
 
@@ -105,7 +86,7 @@ Settings can be overridden via `.env` (see `.env.sample`) or edited directly in 
 | Power amplifier    | GPIO 46                            |
 | Home button (red ●)| GT911 soft key (I2C reg 0x814E)    |
 | Boot button        | GPIO 0                             |
-| Mute button        | GPIO 1                             |
+| Mute switch        | GPIO 1                             |
 
 ## Bluetooth Speaker Output
 
@@ -139,67 +120,48 @@ pio run -e bt-bridge -t upload --upload-port /dev/ttyUSB0  # flash
 
 ## Home Assistant Integration
 
-The radio appears as a full media player in Home Assistant via MQTT auto-discovery.
+The radio appears as a native ESPHome media player in Home Assistant — no MQTT required.
+
+### Entities
+
+| Entity | Type | Description |
+|--------|------|-------------|
+| ESP32 Radio | Media Player | Play/pause/stop/volume/mute + play_media for arbitrary URLs |
+| Station | Select | Station picker with all configured stations |
+| Now Playing | Text Sensor | Current song (Artist - Title) |
+| Screen Brightness | Number | Display brightness (1-255) |
+| BT Speaker | Switch | Toggle Bluetooth/local speaker output |
+| Next/Previous Station | Buttons | Station navigation |
 
 ### Setup
 
-1. Configure MQTT broker details in `.env` (see Configuration above)
-2. The radio publishes HA discovery on connect — entities appear automatically
-3. Optionally add `ha/media_player.yaml` to your HA config for a unified media player entity
-
-### MQTT Topics
-
-| Topic                                      | Direction | Description                    |
-|--------------------------------------------|-----------|--------------------------------|
-| `esp32radio/state`                         | Publish   | JSON state (retained)          |
-| `esp32radio/availability`                  | Publish   | `online`/`offline` (LWT)       |
-| `esp32radio/cmd/{volume,mute,source,...}`  | Subscribe | Commands from HA               |
-| `homeassistant/device/esp32radio/config`   | Publish   | HA device discovery (retained) |
-
-### Exposed Entities
-
-- **Select**: Station picker (all configured stations)
-- **Number**: Volume (0–100%)
-- **Switch**: Mute toggle
-- **Sensors**: Now Playing, State, Bitrate, WiFi Signal (dBm)
-- **Buttons**: Play, Pause, Stop, Next, Previous
-
-### Universal Media Player
-
-Copy `ha/media_player.yaml` into your HA configuration to combine the individual MQTT entities into a single `media_player` entity with full transport controls, source selection, and volume management.
-
-## Adding Stations
-
-Edit the `stationUrls[]` and `stationNames[]` arrays in `src/main.cpp`. Update `NUM_STATIONS` to match. The UI supports up to 10 stations in the visible list. Station names also appear in the MQTT select entity — restart the device to update HA discovery.
+1. ESPHome device auto-discovers in HA (Settings → Devices → ESP32 Radio)
+2. All entities appear automatically via the native API
+3. No MQTT broker required
 
 ## Architecture
 
-- **Core 0**: Audio streaming task — `audio.loop()` runs continuously for uninterrupted playback
-- **Core 1**: Main loop — UI rendering at ~15fps, touch/button input, MQTT polling
-- **Display**: Single PSRAM-backed sprite (320×240), composed and pushed once per frame
-- **Audio**: ES8311 I2C codec driver, ESP32-audioI2S library for HTTP MP3 streaming
+- **Core 0**: Dedicated FreeRTOS audio task — `audio.loop()` runs continuously for uninterrupted playback
+- **Core 1**: ESPHome main loop — UI rendering at ~15fps, touch/button input, FFT computation, WiFi, HA API
+- **Display**: PSRAM-backed LovyanGFX sprite (320×218), composed and pushed once per frame
+- **Audio**: ES8311 I2C codec (via ESPHome `audio_dac`), ESP32-audioI2S library for HTTP streaming
+- **FFT**: 128-point radix-2 FFT — Core 0 captures samples (double-buffered), Core 1 computes spectrum
 - **I2S Bridge**: `audio_process_i2s()` hook sends decoded PCM to I2S1 TX when BT mode is active
-- **MQTT**: PubSubClient with HA device-based auto-discovery and JSON state publishing
+- **HA Integration**: ESPHome native API with publish-on-change (zero polling)
 
 ## Project Structure
 
 ```
-├── src/
-│   ├── main.cpp          # Application entry point, UI, audio callbacks
-│   ├── mqtt.cpp          # MQTT broker connection, HA discovery, commands
-│   ├── i2s_bridge.cpp    # I2S1 TX bridge for BT output
-│   └── es8311.cpp        # ES8311 codec I2C driver
-├── include/
-│   ├── config.h          # WiFi, MQTT, audio defaults
-│   ├── mqtt.h            # MQTT public API and constants
-│   └── pins.h            # Pin definitions for all peripherals
-├── bt-bridge/            # ESP32-WROOM-32D BT A2DP bridge firmware
-├── ha/
-│   └── media_player.yaml # HA Universal Media Player config
-├── test/
-│   └── test_native/      # Host-side unit tests (Unity)
-└── boards/
-    └── esp32-s3-box.json # Custom board definition
+├── esphome/
+│   ├── esp32radio.yaml              # Main ESPHome config
+│   ├── secrets.yaml                 # WiFi/API credentials (gitignored)
+│   └── components/
+│       ├── internet_radio/          # Media player component (audio streaming)
+│       ├── i2s_bridge/              # I2S bridge switch (BT speaker output)
+│       └── winamp_display/          # Winamp 2 display, touch, FFT visualizer
+├── bt-bridge/                       # ESP32-WROOM-32D BT A2DP bridge firmware
+└── archive/
+    └── platformio/                  # Legacy PlatformIO firmware (reference only)
 ```
 
 ## License

@@ -4,11 +4,11 @@
 
 ## Project Overview
 
-Dual-implementation internet radio for the ESP32-S3-BOX-3. The **active implementation** lives in `esphome/` — custom external components running on the ESPHome platform. The legacy PlatformIO firmware in `src/` is kept as reference but is no longer the primary target.
+ESPHome-based internet radio for the ESP32-S3-BOX-3. Custom external components in `esphome/` handle audio streaming, BT speaker bridge, and Winamp 2 display. ESPHome provides OTA, native HA API, and WiFi management.
 
-- **ESPHome firmware** (`esphome/`): Custom external components for audio streaming, BT speaker bridge, and Winamp 2 display. Gains OTA, native HA API, WiFi management from ESPHome.
-- **PlatformIO firmware** (`src/`): Original standalone Arduino firmware with MQTT integration. Kept as reference for audio/UI behavior.
-- **BT bridge firmware** (`bt-bridge/`): Separate ESP32-WROOM-32D project (unchanged, builds independently).
+- **ESPHome firmware** (`esphome/`): Custom external components for audio streaming, BT speaker bridge, and Winamp 2 display.
+- **BT bridge firmware** (`bt-bridge/`): Separate PlatformIO project for ESP32-WROOM-32D (I2S→A2DP bridge, builds independently).
+- **Legacy firmware** (`archive/platformio/`): Original standalone Arduino firmware with MQTT. Kept as reference only.
 
 ## Hardware
 
@@ -47,7 +47,8 @@ esphome/
         ├── __init__.py          # Schema, codegen, LovyanGFX + esp_lcd
         ├── winamp_display.h     # Component + I2CDevice
         ├── winamp_display.cpp   # Rendering (~200 LOC draw_frame_)
-        └── winamp_touch.cpp     # Touch via ESPHome I2C bus
+        ├── winamp_touch.cpp     # Touch via ESPHome I2C bus
+        └── spectrum.cpp         # FFT visualizer (separate TU, weak override)
 ```
 
 ### Core Threading Model
@@ -74,6 +75,16 @@ audio.setVolume(v)             →    (direct call OK)
 
 **Station URL**: Copied to `pending_url_[256]` BEFORE setting `pending_connect_ = true`. Eliminates ordering race where Core 0 could read a stale `current_station_` index.
 
+### FFT Spectrum Visualizer
+
+Split across two cores for zero audio-path overhead:
+
+- **Core 0** (`audio_process_raw_samples` in `spectrum.cpp`): Lightweight sample capture only — mixes stereo to mono, fills double-buffered accumulator, flips buffer when 128 samples collected. ~microseconds per callback.
+- **Core 1** (`spectrum_compute()` called from `draw_frame_`): Reads completed sample buffer, runs 128-point radix-2 FFT, aggregates into 16 logarithmic frequency bands (magnitude²). ~100μs — negligible within 55-78ms frame time.
+- **Double buffer**: `sample_bufs[2][128]` with volatile `write_buf_` index. Core 0 writes to one buffer, Core 1 reads the other. `sample_ready` flag set last as release signal.
+- **No esp_dsp dependency**: Self-contained FFT using only `<math.h>`. Pre-computed Hann window and twiddle factors. This avoids enabling Audio library's internal FFT/EQ processing (see esp_dsp pitfall).
+- `audio_process_raw_samples` MUST use C++ linkage (no `extern "C"`) and live in its own `.cpp` without `Audio.h` — same weak-symbol rules as `audio_process_i2s`.
+
 ### Component Setup Priority
 
 Components initialize in order: InternetRadio (`LATE`) → I2SBridge (`LATE - 1`) → WinampDisplay (`LATE - 2`).
@@ -82,10 +93,12 @@ Components initialize in order: InternetRadio (`LATE`) → I2SBridge (`LATE - 1`
 
 - ESPHome native API replaces MQTT for HA communication
 - `MediaPlayer` entity: play/pause/stop/toggle/volume/mute/turn_on/turn_off + play_media (arbitrary URLs)
-- `template text_sensor` "Now Playing": publishes song title
-- `template select` "Station": publishes and accepts station selection
+- `template text_sensor` "Now Playing": publishes song title on change
+- `template select` "Station": publishes and accepts station selection on change
+- `template number` "Screen Brightness": publishes brightness on change (1-255)
 - `button` entities for Next/Previous: required workaround (see API Protocol Gap below)
 - `play_media`: accepts arbitrary HTTP stream URLs from HA media browser or automations
+- **Publish-on-change pattern**: C++ setters hold optional pointers to HA entities and call `publish_state()` directly. No polling intervals — zero overhead when values don't change.
 
 ### ESPHome API Protocol Gap (CRITICAL)
 
@@ -116,11 +129,9 @@ esphome upload esp32radio.yaml     # Flash via OTA (after first USB flash)
 esphome logs esp32radio.yaml --device /dev/ttyACM0    # Serial logs
 ```
 
-### PlatformIO (legacy + tests)
+### BT Bridge (PlatformIO)
 
 ```bash
-pio run -e esp32-s3-box             # Build legacy firmware
-pio test -e native                  # Run native unit tests (always run before commit)
 cd bt-bridge && pio run -e bt-bridge  # Build BT bridge firmware
 ```
 
@@ -265,8 +276,7 @@ Before completing any task, follow this checklist:
 
 1. **Re-read**: Review the Code Review Checklist and ESPHome Pitfalls sections above
 2. **Build**: `cd esphome && esphome compile esp32radio.yaml` — compiles without errors
-3. **Test**: `pio test -e native` — all unit tests pass (run from repo root)
-4. **Flash & verify**: `esphome upload esp32radio.yaml --device /dev/ttyACM0` — test on hardware
-5. **Code review**: Review the diff (`git diff`) against the checklist above
-6. **Update docs**: Update this file if the change affects features, architecture, pitfalls, or the checklist
-7. **Commit**: Write a descriptive commit message summarizing all changes
+3. **Flash & verify**: `esphome upload esp32radio.yaml --device /dev/ttyACM0` — test on hardware
+4. **Code review**: Review the diff (`git diff`) against the checklist above
+5. **Update docs**: Update this file if the change affects features, architecture, pitfalls, or the checklist
+6. **Commit**: Write a descriptive commit message summarizing all changes
