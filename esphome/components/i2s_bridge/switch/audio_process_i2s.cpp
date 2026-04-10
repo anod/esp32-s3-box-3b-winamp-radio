@@ -10,10 +10,15 @@
 
 using esphome::i2s_bridge::I2SBridge;
 
+// Frame counter for buffer underrun watchdog (defined in internet_radio.cpp)
+extern volatile uint32_t g_audio_frame_count;
+
 // Overrides weak audio_process_i2s from ESP32-audioI2S library.
 // Called after volume/gain/EQ, before I2S0 write. Runs on Core 0.
 // I2S0 write MUST proceed (paces the decoder) — we piggyback on it.
 void audio_process_i2s(int32_t *outBuff, int16_t validSamples, bool *continueI2S) {
+  g_audio_frame_count++;  // near-zero-cost heartbeat for underrun watchdog
+
   if (!I2SBridge::is_active() || validSamples <= 0) return;
 
   i2s_chan_handle_t tx = I2SBridge::get_tx_handle();

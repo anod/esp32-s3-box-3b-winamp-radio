@@ -7,6 +7,11 @@
 #include "esphome/components/network/util.h"
 #include "../../i2s_bridge/switch/i2s_bridge.h"
 
+// Audio frame counter — incremented by audio_process_i2s on Core 0 (near-zero cost).
+// Read by loop() on Core 1 for underrun detection.
+// Defined at global scope to match extern declarations in other TUs.
+volatile uint32_t g_audio_frame_count = 0;
+
 namespace esphome {
 namespace internet_radio {
 
@@ -106,6 +111,33 @@ void InternetRadio::loop() {
     }
   }
 
+  // Buffer underrun watchdog: if playing but no audio frames produced for
+  // UNDERRUN_TIMEOUT_MS, the stream is stalled (ring buffer drained, library
+  // stuck in error loop). Reconnect to recover — the Audio library won't
+  // fire evt_eof in this state.
+  // Uses a frame counter (incremented on Core 0) instead of millis() in the
+  // audio callback to avoid any overhead in the hot audio path.
+  {
+    unsigned long now = millis();
+    if (now - this->watchdog_last_check_ms_ >= 1000) {
+      this->watchdog_last_check_ms_ = now;
+      uint32_t fc = g_audio_frame_count;
+      if (this->play_state_ == PS_PLAYING && this->wifi_connected_ &&
+          !this->stream_failed_ && !this->pending_connect_) {
+        if (fc == this->watchdog_last_frame_count_ &&
+            this->watchdog_stall_count_++ >= (UNDERRUN_TIMEOUT_MS / 1000)) {
+          ESP_LOGW(TAG, "No audio output for %lus, reconnecting",
+                   (unsigned long)(UNDERRUN_TIMEOUT_MS / 1000));
+          this->watchdog_stall_count_ = 0;
+          this->connect_station_();
+        }
+      } else {
+        this->watchdog_stall_count_ = 0;
+      }
+      this->watchdog_last_frame_count_ = fc;
+    }
+  }
+
   // Non-blocking PA enable (replaces 200ms blocking delay)
   if (this->pa_pending_ && (millis() - this->pa_pending_ms_ >= 200)) {
     this->pa_pending_ = false;
@@ -194,6 +226,7 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
     this->title_read_idx_ = write_idx;
     this->play_state_ = PS_PLAYING;
     this->pending_connect_ = true;
+    this->watchdog_stall_count_ = 0;  // reset underrun watchdog
     if (this->pa_pin_ >= 0 && !i2s_bridge::I2SBridge::is_active()) {
       this->pa_pending_ms_ = millis();
       this->pa_pending_ = true;
@@ -321,6 +354,8 @@ void InternetRadio::connect_station_() {
   this->title_read_idx_ = write_idx;
   this->play_state_ = PS_PLAYING;
   this->pending_connect_ = true;
+  // Reset underrun watchdog — give the new connection time to start producing audio
+  this->watchdog_stall_count_ = 0;
   // Non-blocking PA enable — schedule for 200ms from now
   if (this->pa_pin_ >= 0 && !i2s_bridge::I2SBridge::is_active()) {
     this->pa_pending_ms_ = millis();

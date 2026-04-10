@@ -185,6 +185,16 @@ ESPHome's `i2c:` component owns I2C bus 0 (GPIO 8/18). LovyanGFX `tft_.init()` t
 - Parse `"SampleRate (Hz):"` from `Audio::evt_info` callback and update the variable
 - If not updated, the I2S bridge resampler won't engage → audio plays at wrong speed ("funny voice")
 
+### Buffer Underrun Watchdog
+
+- The ESP32-audioI2S ring buffer can drain completely if the stream stalls (server drop, WiFi hiccup)
+- When this happens, the library logs `bytesWasRead(): readSpace < br` every ~100ms and does `vTaskDelay(100)` — but never fires `evt_eof`
+- The `vTaskDelay(100)` also blocks `audio.loop()`, slowing buffer refill (negative feedback loop)
+- **Solution**: `g_audio_frame_count` volatile counter is incremented by `audio_process_i2s` on Core 0 (single increment — near-zero cost in the audio hot path). `loop()` on Core 1 checks every second: if frame count hasn't advanced for 10 consecutive checks while playing → auto-reconnect via `connect_station_()`
+- The stall counter is reset on every `connect_station_()` and `play_media` call to give new connections time to establish
+- Any new code path that starts playback must also reset `watchdog_stall_count_ = 0`
+- Do NOT call `millis()` or other expensive functions inside `audio_process_i2s` or `audio_process_raw_samples` — they run on Core 0's audio hot path and can cause crackling
+
 ### Non-Blocking PA Enable
 
 - The PA pin (GPIO 46) needs a ~200ms delay after codec init before enabling, to prevent speaker pop

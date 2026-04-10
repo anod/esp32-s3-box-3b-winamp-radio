@@ -17,6 +17,11 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+// Audio frame counter: incremented by audio_process_i2s on Core 0,
+// read by InternetRadio::loop() on Core 1 for underrun detection.
+// A simple increment is near-zero-cost in the audio hot path.
+extern volatile uint32_t g_audio_frame_count;
+
 namespace esphome {
 namespace internet_radio {
 
@@ -138,6 +143,12 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   volatile bool stream_failed_{false};
   unsigned long last_retry_ms_{0};
   static constexpr unsigned long RETRY_INTERVAL_MS = 5000;
+
+  // Buffer underrun watchdog — reconnects if no audio frames for this long
+  static constexpr unsigned long UNDERRUN_TIMEOUT_MS = 10000;
+  uint32_t watchdog_last_frame_count_{0};
+  unsigned long watchdog_last_check_ms_{0};
+  unsigned int watchdog_stall_count_{0};
 
   // Debounced NVS saves (prevents flash wear from rapid volume changes)
   bool vol_dirty_{false};
