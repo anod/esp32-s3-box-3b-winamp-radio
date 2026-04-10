@@ -244,7 +244,7 @@ Separate PlatformIO project for an ESP32-WROOM-32D that receives I2S audio from 
 
 - **Architecture**: I2S0 slave RX → lock-free `PcmRingBuffer` → A2DP source callback
 - **I2S wiring**: S3 GPIO 10→25 (BCLK), GPIO 14→26 (LRCK), GPIO 11→27 (DOUT→DIN), plus common GND
-- **Config**: `bt-bridge/include/config.h` — `BT_SINK_NAME` (default `"JBL Flip 4"`), ring buffer size 2048 frames
+- **Config**: `bt-bridge/include/config.h` — `BT_SINK_NAME` (default `"JBL Flip 4"`), ring buffer size 8192 frames
 - **DMA tuning**: I2S1 on the S3 side needs 16×480 DMA frames with 10ms write timeout to avoid drops
 - ESP32-S3 does NOT support Bluetooth Classic (BR/EDR) — only BLE 5.0. A2DP requires the original ESP32.
 - WiFi and BT Classic cannot coexist on a single ESP32 — hence the two-board wired I2S approach.
@@ -252,6 +252,44 @@ Separate PlatformIO project for an ESP32-WROOM-32D that receives I2S audio from 
 - Never set `*continueI2S=false` in `audio_process_i2s` — it removes I2S0 blocking write pacing, causing the decoder to run at CPU speed and flood downstream buffers.
 - Bridge includes linear interpolation resampler for non-44100Hz sources (e.g., BBC at 48kHz).
 - Write 960 bytes of silence after `i2s_channel_enable()` to prevent BT speaker crack on reconnect.
+
+### Throughput Capacity
+
+The bridge chain comfortably handles maximum internet radio bitrates. End-to-end data flow for a single BT speaker:
+
+| Stage | Data rate | Buffer depth |
+|---|---|---|
+| Internet stream (compressed) | ≤320 kbps (MP3) / 256 kbps (AAC) | — |
+| Decoded PCM on S3 | 1,411 kbps (44.1kHz) / 1,536 kbps (48kHz) | — |
+| I2S1 TX wire (fixed 44100 Hz 16-bit stereo) | 1,411 kbps | 174ms (16×480 DMA frames) |
+| Ring buffer on WROOM-32D | — | 186ms (8192 frames × 4 bytes = 32KB) |
+| A2DP SBC to BT speaker | ~345 kbps | — |
+| BT Classic EDR link (single device) | ~3 Mbps available | — |
+
+- **Total jitter absorption**: ~360ms (DMA + ring buffer) before underrun
+- **BT headroom**: Single A2DP SBC stream at ~345 kbps uses ~12% of EDR capacity
+- **Resampler limits**: `resBuf[4096*2]` with `outIdx < 4096` guard. For 48kHz→44.1kHz: 2048 input → ~1882 output frames (safe). Sources below ~22,050 Hz would truncate output — not a crash, but internet radio streams are always ≥ 22,050 Hz
+- **10ms write timeout**: Intentionally short to avoid blocking Core 0 decoder — drops frames rather than stalling audio pipeline
+
+### Verifying Throughput on Hardware
+
+The bt-bridge firmware already prints stats every 3 seconds on serial (`bt-bridge/src/main.cpp:110`). To verify the bridge handles max bitrate:
+
+1. **Connect serial monitors** to both boards:
+   ```bash
+   # Terminal 1 — S3 (ESPHome logs)
+   esphome logs esp32radio.yaml --device /dev/ttyACM0
+   # Terminal 2 — WROOM-32D (bt-bridge stats)
+   pio device monitor -e bt-bridge -b 115200
+   ```
+2. **Stream a 320kbps MP3** (max common internet radio bitrate) or a **48kHz AAC** stream (highest sample rate seen in practice, e.g., BBC streams). Use HA `play_media` or the station list.
+3. **Check bt-bridge serial output** — healthy values for 44.1kHz stereo:
+   - `I2S in: ~44100 f/s` — slave RX matching the master clock
+   - `A2DP out: ~44100 f/s` — SBC encoder keeping up
+   - `buf: <8192` — ring buffer not full (backpressure OK)
+   - `underruns: 0` — no starvation
+4. **For 48kHz sources**, verify the S3 ESPHome log shows `SampleRate (Hz): 48000` and the bt-bridge still reports ~44100 f/s out (resampler is working).
+5. **Failure indicators**: rising `underruns` count, `I2S in` significantly below 44100, or `buf` stuck at 0 or 8192 (empty/full).
 
 ## Coding Guidelines
 

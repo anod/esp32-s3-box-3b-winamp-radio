@@ -41,7 +41,7 @@ const char* stationUrls[NUM_STATIONS] = {
     "http://listen.181fm.com/181-hardrock_128k.mp3",         // Hard Rock
     "http://stream.rockantenne.de/heavy-metal/stream/mp3",   // Metal
     "http://listen.181fm.com/181-power_128k.mp3",            // Pop / Top 40
-    "https://live.amperwave.net/manifest/audacy-kroqfmaac-hlsc.m3u8", // Alt Rock (KROQ)
+    "https://live.amperwave.net/direct/audacy-kroqfmaac-imc", // Alt Rock (KROQ)
     "http://stream.live.vc.bbcmedia.co.uk/bbc_world_service", // News (BBC)
     "http://npr-ice.streamguys1.com/live.mp3"                // News (NPR)
 };

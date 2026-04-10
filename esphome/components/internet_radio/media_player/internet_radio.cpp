@@ -29,7 +29,7 @@ const Station InternetRadio::stations_[NUM_STATIONS] = {
     {"181 Hard Rock", "http://listen.181fm.com/181-hardrock_128k.mp3"},
     {"Heavy Metal", "http://stream.rockantenne.de/heavy-metal/stream/mp3"},
     {"181 Power Hits", "http://listen.181fm.com/181-power_128k.mp3"},
-    {"KROQ", "https://live.amperwave.net/manifest/audacy-kroqfmaac-hlsc.m3u8"},
+    {"KROQ", "https://live.amperwave.net/direct/audacy-kroqfmaac-imc"},
     {"BBC World News", "http://stream.live.vc.bbcmedia.co.uk/bbc_world_service"},
     {"NPR News", "http://npr-ice.streamguys1.com/live.mp3"},
 };
