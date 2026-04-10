@@ -488,7 +488,7 @@ void InternetRadio::audio_callback(Audio::msg_t msg) {
       break;
 
     case Audio::evt_streamtitle:
-      ESP_LOGI(TAG, "title: %s", msg.msg);
+      ESP_LOGV(TAG, "title: %s", msg.msg);
       if (msg.msg && msg.msg[0] != '\0') {
         int wi = 1 - self->title_read_idx_;
         strlcpy(self->title_bufs_[wi], msg.msg, 128);
@@ -497,7 +497,7 @@ void InternetRadio::audio_callback(Audio::msg_t msg) {
       break;
 
     case Audio::evt_name:
-      ESP_LOGI(TAG, "station: %s", msg.msg);
+      ESP_LOGV(TAG, "station: %s", msg.msg);
       self->play_state_ = PS_PLAYING;
       {
         const char *cur = self->title_bufs_[self->title_read_idx_];
@@ -510,7 +510,7 @@ void InternetRadio::audio_callback(Audio::msg_t msg) {
       break;
 
     case Audio::evt_id3data:
-      ESP_LOGD(TAG, "id3: %s", msg.msg);
+      ESP_LOGV(TAG, "id3: %s", msg.msg);
       if (msg.msg) {
         if (strncmp(msg.msg, "Title: ", 7) == 0) {
           strlcpy(self->id3_title_, msg.msg + 7, sizeof(self->id3_title_));
@@ -532,16 +532,17 @@ void InternetRadio::audio_callback(Audio::msg_t msg) {
       break;
 
     case Audio::evt_eof:
-      ESP_LOGW(TAG, "Stream ended");
+      ESP_LOGV(TAG, "Stream ended");
       self->play_state_ = PS_STOPPED;
       self->stream_failed_ = true;
       self->last_retry_ms_ = millis();
       break;
 
     case Audio::evt_log:
-      ESP_LOGD(TAG, "log: %s", msg.msg);
+      ESP_LOGV(TAG, "log: %s", msg.msg);
       if (msg.msg && (strstr(msg.msg, "failed") || strstr(msg.msg, "error"))) {
-        ESP_LOGW(TAG, "Stream error detected, will retry");
+        // Don't log here — UART on Core 0 causes audio jitter.
+        // Core 1's retry logic logs when it reconnects.
         self->stream_failed_ = true;
         self->last_retry_ms_ = millis();
       }
