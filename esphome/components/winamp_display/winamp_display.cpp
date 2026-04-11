@@ -263,6 +263,13 @@ void WinampDisplay::draw_frame_() {
   c.setTextColor(this->c_dim_, this->c_panel_);
   c.drawString("WIFI", RPANEL_X + 6, ry + 4, 1);
 
+  // Station list indicator — barely visible dot, top-right of WiFi panel
+  // Dim when normal list, orange when test list active
+  {
+    bool test_mode = this->radio_ && this->radio_->is_test_list();
+    c.fillRect(RPANEL_X + RPANEL_W - 8, ry + 3, 3, 3, test_mode ? WA_TEST_DOT : this->c_border_);
+  }
+
   {
     int bars = 0;
     if (wifi_connected) {

@@ -71,6 +71,10 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   static constexpr int get_num_stations() { return NUM_STATIONS; }
   static const char *get_station_name_at(int idx) { return (idx >= 0 && idx < NUM_STATIONS) ? stations_[idx].name : ""; }
 
+  // Station list toggle (normal / test) — saves NVS and reboots
+  void toggle_station_list();
+  bool is_test_list() const { return this->station_list_ != 0; }
+
   // Volume control from UI (bypasses HA MediaPlayerCall overhead)
   void set_volume_direct(int vol);
 
@@ -107,9 +111,11 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   int pa_pin_{46};
   int default_volume_{15};
 
-  // Station presets (hardcoded for PoC — will move to YAML config)
+  // Station presets — two lists, pointer to active one
   static constexpr int NUM_STATIONS = 10;
-  static const Station stations_[NUM_STATIONS];
+  static const Station stations_normal_[NUM_STATIONS];
+  static const Station stations_test_[NUM_STATIONS];
+  static const Station *stations_;  // points to active list
 
   // Shared state (audio task on Core 0, ESPHome loop on Core 1)
   volatile int current_station_{0};
@@ -155,6 +161,9 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   unsigned long vol_dirty_ms_{0};
   static constexpr unsigned long NVS_SAVE_DEBOUNCE_MS = 3000;
 
+  // Station list selection (0=normal, 1=test)
+  int station_list_{0};
+
   // State change detection for HA publishing
   PlayState last_published_state_{PS_STOPPED};
   char last_published_title_[128]{};
@@ -162,6 +171,7 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   // NVS
   ESPPreferenceObject volume_pref_;
   ESPPreferenceObject station_pref_;
+  ESPPreferenceObject list_pref_;
 
   // Optional HA entity references
   text_sensor::TextSensor *now_playing_sensor_{nullptr};

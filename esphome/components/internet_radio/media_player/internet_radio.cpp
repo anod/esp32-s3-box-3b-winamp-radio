@@ -20,8 +20,8 @@ static const char *const TAG = "internet_radio";
 // Singleton instance for C-style Audio callback
 InternetRadio *InternetRadio::instance_ = nullptr;
 
-// Station presets (PoC — matches current firmware)
-const Station InternetRadio::stations_[NUM_STATIONS] = {
+// Station presets — normal list (matches original firmware)
+const Station InternetRadio::stations_normal_[NUM_STATIONS] = {
     {"Groove Salad", "http://ice1.somafm.com/groovesalad-128-mp3"},
     {"Enigmatic Station 1", "http://listen2.myradio24.com/8226"},
     {"Psytrance", "http://hirschmilch.de:7000/psytrance.mp3"},
@@ -34,6 +34,23 @@ const Station InternetRadio::stations_[NUM_STATIONS] = {
     {"NPR News", "http://npr-ice.streamguys1.com/live.mp3"},
 };
 
+// Station presets — stress test list (high bitrate / different codecs)
+const Station InternetRadio::stations_test_[NUM_STATIONS] = {
+    {"MP3 320k Jazz",    "http://mediaserv38.live-streams.nl:8006/live"},
+    {"MP3 320k Pop",     "http://mediaserv30.live-streams.nl:8086/live"},
+    {"MP3 320k Classic", "http://mediaserv30.live-streams.nl:8088/live"},
+    {"AAC 48k BBC R3",   "http://stream.live.vc.bbcmedia.co.uk/bbc_radio_three"},
+    {"AAC 48k BBC R4",   "http://stream.live.vc.bbcmedia.co.uk/bbc_radio_fourfm"},
+    {"FLAC Lossless",    "http://motherearthradio.de:8882/flac"},
+    {"TLS 320k Blues",   "https://blueswave.radio:8002/blues320"},
+    {"MP3 320k Gold",    "http://mediaserv30.live-streams.nl:8000/live"},
+    {"MP3 320k Lounge",  "http://mediaserv33.live-streams.nl:8036/live"},
+    {"MP3 320k World",   "http://mediaserv38.live-streams.nl:8027/live"},
+};
+
+// Active list pointer (set in setup based on NVS)
+const Station *InternetRadio::stations_ = InternetRadio::stations_normal_;
+
 // ─── Setup ────────────────────────────────────────────────
 
 void InternetRadio::setup() {
@@ -42,18 +59,37 @@ void InternetRadio::setup() {
   // Restore saved state
   this->volume_pref_ = global_preferences->make_preference<int>(fnv1_hash("radio_vol"));
   this->station_pref_ = global_preferences->make_preference<int>(fnv1_hash("radio_sta"));
+  this->list_pref_ = global_preferences->make_preference<int>(fnv1_hash("radio_list"));
 
   int saved_vol = this->default_volume_;
   int saved_sta = 0;
+  int saved_list = 0;
   this->volume_pref_.load(&saved_vol);
   this->station_pref_.load(&saved_sta);
+  this->list_pref_.load(&saved_list);
 
   if (saved_vol < 0 || saved_vol > 21) saved_vol = this->default_volume_;
   if (saved_sta < 0 || saved_sta >= NUM_STATIONS) saved_sta = 0;
+  if (saved_list < 0 || saved_list > 1) saved_list = 0;
   this->vol_ = saved_vol;
   this->current_station_ = saved_sta;
+  this->station_list_ = saved_list;
 
-  ESP_LOGI(TAG, "Restored station=%d vol=%d", (int)this->current_station_, (int)this->vol_);
+  // Set active station list pointer
+  stations_ = saved_list ? stations_test_ : stations_normal_;
+
+  // Override HA select options to match active list
+  if (this->station_select_) {
+    FixedVector<const char *> opts;
+    opts.init(NUM_STATIONS);
+    for (int i = 0; i < NUM_STATIONS; i++)
+      opts.push_back(stations_[i].name);
+    this->station_select_->traits.set_options(opts);
+  }
+
+  ESP_LOGI(TAG, "Restored station=%d vol=%d list=%s",
+           (int)this->current_station_, (int)this->vol_,
+           saved_list ? "TEST" : "NORMAL");
 
   // PA pin — keep LOW until stream connects
   if (this->pa_pin_ >= 0) {
@@ -93,6 +129,7 @@ void InternetRadio::loop() {
     if (this->auto_play_pending_) {
       this->auto_play_pending_ = false;
       this->connect_station_();
+      this->publish_station_select_();
     }
   }
   // Detect WiFi disconnect
@@ -399,6 +436,21 @@ void InternetRadio::set_volume_direct(int vol) {
   this->is_muted_ = (vol == 0);
   this->mark_vol_dirty_();
   this->publish_state();
+}
+
+void InternetRadio::toggle_station_list() {
+  this->station_list_ = 1 - this->station_list_;
+  int save_list = this->station_list_;
+  this->list_pref_.save(&save_list);
+  // Reset to station 0 — indices don't map across lists
+  int zero = 0;
+  this->station_pref_.save(&zero);
+  // Flush NVS before reboot — save() only queues, sync() writes to flash
+  global_preferences->sync();
+  ESP_LOGI(TAG, "Switching to %s list, rebooting...",
+           this->station_list_ ? "TEST" : "NORMAL");
+  delay(100);
+  ESP.restart();
 }
 
 void InternetRadio::update_ha_state_() {

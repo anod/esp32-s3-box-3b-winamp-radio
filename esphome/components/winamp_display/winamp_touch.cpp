@@ -90,6 +90,25 @@ void WinampDisplay::handle_touch_() {
     return;
   }
 
+  // Station list toggle — tiny zone in top-right of WiFi panel
+  // Requires 5 taps within 3 seconds to prevent accidental triggers
+  {
+    int ry = HDR_H + 4;
+    if (tx >= RPANEL_X + RPANEL_W / 2 && tx <= RPANEL_X + RPANEL_W &&
+        ty >= ry && ty <= ry + 14) {
+      unsigned long now = millis();
+      if (now - this->list_tap_ms_ > LIST_TAP_WINDOW_MS)
+        this->list_tap_count_ = 0;
+      this->list_tap_count_++;
+      this->list_tap_ms_ = now;
+      if (this->list_tap_count_ >= LIST_TAP_REQUIRED && this->radio_) {
+        this->list_tap_count_ = 0;
+        this->radio_->toggle_station_list();  // saves NVS + reboots
+      }
+      return;
+    }
+  }
+
   // Volume slider — right panel
   int ry = HDR_H + 4;
   int gy = ry + 60;

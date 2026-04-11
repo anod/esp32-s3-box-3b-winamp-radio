@@ -141,6 +141,7 @@ class WinampDisplay final : public Component, public i2c::I2CDevice {
   static constexpr uint16_t WA_HIGHLIGHT = 0xFFFF;
   static constexpr uint16_t WA_SHADOW = 0x8410;
   static constexpr uint16_t WA_BORDER = 0x2104;
+  static constexpr uint16_t WA_TEST_DOT = 0xFD00;  // orange (0xFF, 0xA0, 0x00)
 
   // Ticker state
   static constexpr int TICKER_SPRITE_W = 316;
@@ -162,6 +163,12 @@ class WinampDisplay final : public Component, public i2c::I2CDevice {
   bool touch_detected_{false};
   int touch_x_{0};
   int touch_y_{0};
+
+  // Station list toggle — requires 5 taps within 3s
+  int list_tap_count_{0};
+  unsigned long list_tap_ms_{0};
+  static constexpr int LIST_TAP_REQUIRED = 5;
+  static constexpr unsigned long LIST_TAP_WINDOW_MS = 3000;
 
   // Timing
   unsigned long last_frame_ms_{0};
