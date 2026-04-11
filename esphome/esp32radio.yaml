@@ -26,7 +26,6 @@ psram:
 
 external_components:
   - source: github://anod/esp32-s3-box-3b-winamp-radio@main
-    path: esphome/components
 
 logger:
   level: DEBUG
