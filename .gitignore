@@ -27,8 +27,9 @@ Thumbs.db
 .env
 
 # ESPHome
-esphome/secrets.yaml
-esphome/.esphome/
+secrets.yaml
+.esphome/
+__pycache__/
 
 # Python virtual environments
 .analysis_venv/
