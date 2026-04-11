@@ -4,9 +4,9 @@
 
 ## Project Overview
 
-ESPHome-based internet radio for the ESP32-S3-BOX-3. Custom external components in `esphome/` handle audio streaming, BT speaker bridge, and Winamp 2 display. ESPHome provides OTA, native HA API, and WiFi management.
+ESPHome-based internet radio for the ESP32-S3-BOX-3. Custom external components in `components/` handle audio streaming, BT speaker bridge, and Winamp 2 display. ESPHome provides OTA, native HA API, and WiFi management.
 
-- **ESPHome firmware** (`esphome/`): Custom external components for audio streaming, BT speaker bridge, and Winamp 2 display.
+- **ESPHome firmware** (repo root): `esp32radio.yaml` config + `components/` custom external components for audio streaming, BT speaker bridge, and Winamp 2 display.
 - **BT bridge firmware** (`bt-bridge/`): Separate PlatformIO project for ESP32-WROOM-32D (I2S→A2DP bridge, builds independently).
 - **Legacy firmware** (`archive/platformio/`): Original standalone Arduino firmware with MQTT. Kept as reference only.
 
@@ -25,30 +25,29 @@ ESPHome-based internet radio for the ESP32-S3-BOX-3. Custom external components 
 ### Component Layout
 
 ```
-esphome/
-├── esp32radio.yaml              # Main config: board, WiFi, API, OTA, components
-├── secrets.yaml                 # WiFi/API credentials (gitignored)
-└── components/
-    ├── internet_radio/          # Parent namespace package
-    │   ├── __init__.py          # Defines internet_radio_ns
-    │   └── media_player/
-    │       ├── __init__.py      # Schema, codegen, IDF workarounds
-    │       ├── internet_radio.h # MediaPlayer subclass
-    │       ├── internet_radio.cpp
-    │       └── stubs/esp_dsp.h  # Stub for unused Audio.h dependency
-    ├── i2s_bridge/
-    │   ├── __init__.py          # Defines i2s_bridge_ns
-    │   └── switch/
-    │       ├── __init__.py      # Schema, codegen
-    │       ├── i2s_bridge.h     # Switch subclass + static state
-    │       ├── i2s_bridge.cpp   # I2S1 TX channel management
-    │       └── audio_process_i2s.cpp  # Weak override (MUST be separate TU)
-    └── winamp_display/
-        ├── __init__.py          # Schema, codegen, LovyanGFX + esp_lcd
-        ├── winamp_display.h     # Component + I2CDevice
-        ├── winamp_display.cpp   # Rendering (~200 LOC draw_frame_)
-        ├── winamp_touch.cpp     # Touch via ESPHome I2C bus
-        └── spectrum.cpp         # FFT visualizer (separate TU, weak override)
+esp32radio.yaml                  # Main config: board, WiFi, API, OTA, components
+secrets.yaml                     # WiFi/API credentials (gitignored)
+components/
+├── internet_radio/              # Parent namespace package
+│   ├── __init__.py              # Defines internet_radio_ns
+│   └── media_player/
+│       ├── __init__.py          # Schema, codegen, IDF workarounds
+│       ├── internet_radio.h     # MediaPlayer subclass
+│       ├── internet_radio.cpp
+│       └── stubs/esp_dsp.h      # Stub for unused Audio.h dependency
+├── i2s_bridge/
+│   ├── __init__.py              # Defines i2s_bridge_ns
+│   └── switch/
+│       ├── __init__.py          # Schema, codegen
+│       ├── i2s_bridge.h         # Switch subclass + static state
+│       ├── i2s_bridge.cpp       # I2S1 TX channel management
+│       └── audio_process_i2s.cpp  # Weak override (MUST be separate TU)
+└── winamp_display/
+    ├── __init__.py              # Schema, codegen, LovyanGFX + esp_lcd
+    ├── winamp_display.h         # Component + I2CDevice
+    ├── winamp_display.cpp       # Rendering (~200 LOC draw_frame_)
+    ├── winamp_touch.cpp         # Touch via ESPHome I2C bus
+    └── spectrum.cpp             # FFT visualizer (separate TU, weak override)
 ```
 
 ### Core Threading Model
@@ -122,7 +121,6 @@ Even `speaker_source` (the new official ESPHome media player component) has the 
 ### Build & Deploy Commands
 
 ```bash
-cd esphome/
 esphome compile esp32radio.yaml    # Build
 esphome upload esp32radio.yaml --device /dev/ttyACM0  # Flash via USB
 esphome upload esp32radio.yaml     # Flash via OTA (after first USB flash)

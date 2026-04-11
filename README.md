@@ -152,13 +152,12 @@ The radio appears as a native ESPHome media player in Home Assistant — no MQTT
 ## Project Structure
 
 ```
-├── esphome/
-│   ├── esp32radio.yaml              # Main ESPHome config
-│   ├── secrets.yaml                 # WiFi/API credentials (gitignored)
-│   └── components/
-│       ├── internet_radio/          # Media player component (audio streaming)
-│       ├── i2s_bridge/              # I2S bridge switch (BT speaker output)
-│       └── winamp_display/          # Winamp 2 display, touch, FFT visualizer
+├── esp32radio.yaml                  # Main ESPHome config
+├── secrets.yaml                     # WiFi/API credentials (gitignored)
+├── components/
+│   ├── internet_radio/              # Media player component (audio streaming)
+│   ├── i2s_bridge/                  # I2S bridge switch (BT speaker output)
+│   └── winamp_display/              # Winamp 2 display, touch, FFT visualizer
 ├── bt-bridge/                       # ESP32-WROOM-32D BT A2DP bridge firmware
 └── archive/
     └── platformio/                  # Legacy PlatformIO firmware (reference only)
