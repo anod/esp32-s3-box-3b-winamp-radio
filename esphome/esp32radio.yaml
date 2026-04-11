@@ -29,7 +29,7 @@ external_components:
       type: git
       url: https://github.com/anod/esp32-s3-box-3b-winamp-radio
       ref: main
-    path: esphome/components
+      path: esphome/components
 
 logger:
   level: DEBUG
