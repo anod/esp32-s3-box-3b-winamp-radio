@@ -25,22 +25,18 @@ psram:
   speed: 80MHz
 
 external_components:
-  - source:
-      type: git
-      url: https://github.com/anod/esp32-s3-box-3b-winamp-radio
-      ref: main
-      path: esphome/components
+  - source: components
 
 logger:
   level: DEBUG
 
 api:
   encryption:
-    key: !secret api_key
+    key: !secret esp32radio_api_key
 
 ota:
   - platform: esphome
-    password: !secret ota_password
+    password: !secret esp32radio_ota_password
 
 wifi:
   ssid: !secret wifi_ssid
