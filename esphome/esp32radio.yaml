@@ -25,7 +25,8 @@ psram:
   speed: 80MHz
 
 external_components:
-  - source: components
+  - source: github://anod/esp32-s3-box-3b-winamp-radio@main
+    path: esphome/components
 
 logger:
   level: DEBUG
