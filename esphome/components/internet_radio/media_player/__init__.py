@@ -74,6 +74,11 @@ async def to_code(config):
     stubs_dir = Path(__file__).parent / "stubs"
     cg.add_build_flag(f"-I{stubs_dir}")
 
+    # Patch Audio library: httpPrint() sends Icy-MetaData:2 on redirects,
+    # which makes Amperwave/Audacy CDN disable ICY metadata entirely.
+    patch_script = Path(__file__).parent / "patch_audio_lib.py"
+    cg.add_platformio_option("extra_scripts", [f"pre:{patch_script}"])
+
     cg.add(var.set_i2s_bclk_pin(config[CONF_I2S_BCLK_PIN]))
     cg.add(var.set_i2s_lrclk_pin(config[CONF_I2S_LRCLK_PIN]))
     cg.add(var.set_i2s_dout_pin(config[CONF_I2S_DOUT_PIN]))

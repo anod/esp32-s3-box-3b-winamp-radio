@@ -146,6 +146,7 @@ These workarounds are in `__init__.py` files and MUST be preserved:
 5. **`-DCORE_DEBUG_LEVEL=2`** → Arduino macro not set by ESPHome framework. Required by some libraries.
 6. **LovyanGFX defines** → `-DLGFX_USE_V1` and `-DLGFX_AUTODETECT` MUST be set via `cg.add_build_flag()`, NOT in headers (causes redefinition warnings).
 7. **Platform component schemas** → `media_player`, `switch`, `i2c` CANNOT be listed in `DEPENDENCIES = [...]` — causes import errors. Use `DEPENDENCIES = ["network"]` or `["i2c"]` only for non-platform deps.
+8. **`Icy-MetaData:2` in Audio library** → `httpPrint()` (redirect handler) sends both `Icy-MetaData:1` and `Icy-MetaData:2` headers. Some CDNs (Amperwave/Audacy) disable ICY metadata entirely when they see `:2`, breaking StreamTitle. Pre-build script `patch_audio_lib.py` comments out the `:2` line.
 
 ### Framework Versions
 
