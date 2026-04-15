@@ -4,6 +4,7 @@
 
 #include "i2s_bridge.h"
 #include "esphome/core/log.h"
+#include "driver/gpio.h"
 
 namespace esphome {
 namespace i2s_bridge {
@@ -36,8 +37,10 @@ void I2SBridge::write_state(bool state) {
   if (state && !tx_handle_) {
     // Mute internal speaker before enabling bridge
     if (this->pa_pin_ >= 0) {
-      pinMode(this->pa_pin_, OUTPUT);
-      digitalWrite(this->pa_pin_, LOW);
+      auto gpio = static_cast<gpio_num_t>(this->pa_pin_);
+      gpio_reset_pin(gpio);
+      gpio_set_direction(gpio, GPIO_MODE_OUTPUT);
+      gpio_set_level(gpio, 0);
     }
     this->init_i2s_();
     active_ = true;
@@ -47,7 +50,7 @@ void I2SBridge::write_state(bool state) {
     this->deinit_i2s_();
     // Re-enable internal speaker
     if (this->pa_pin_ >= 0) {
-      digitalWrite(this->pa_pin_, HIGH);
+      gpio_set_level(static_cast<gpio_num_t>(this->pa_pin_), 1);
     }
     ESP_LOGI(TAG, "I2S bridge disabled (internal speaker restored)");
   }
