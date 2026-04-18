@@ -165,15 +165,10 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   char title_bufs_[2][128]{};
   volatile int title_read_idx_{0};  // index Core 1 reads from
 
-  // Cross-core pending flags (set on Core 1, consumed on Core 0)
-  volatile bool pending_connect_{false};
-  volatile bool pending_pause_{false};
-  volatile bool pending_stop_{false};
-  char pending_url_[256]{};  // URL copied before setting pending_connect_
-
   // Non-blocking PA enable (avoids 200ms delay in main loop)
-  unsigned long pa_pending_ms_{0};
-  bool pa_pending_{false};
+  // Written from Core 0 (player_event_cb_), read/cleared on Core 1
+  volatile unsigned long pa_pending_ms_{0};
+  volatile bool pa_pending_{false};
 
   // WiFi / stream lifecycle
   bool wifi_connected_{false};

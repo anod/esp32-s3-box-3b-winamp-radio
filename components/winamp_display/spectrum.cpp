@@ -133,9 +133,10 @@ void feed_fft_samples(const uint8_t *data, int size) {
     accum_idx++;
     if (accum_idx >= FFT_N) {
       accum_idx = 0;
-      sample_ready = true;
+      // Flip buffer BEFORE signaling ready — ensures consumer reads completed buffer
       write_buf_ = 1 - wb;
       wb = write_buf_;
+      sample_ready = true;
     }
   }
 }

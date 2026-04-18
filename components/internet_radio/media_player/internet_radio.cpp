@@ -193,7 +193,7 @@ void InternetRadio::loop() {
       this->watchdog_last_check_ms_ = now;
       uint32_t fc = g_audio_frame_count;
       if (this->play_state_ == PS_PLAYING && this->wifi_connected_ &&
-          !this->stream_failed_ && !this->pending_connect_) {
+          !this->stream_failed_) {
         if (fc == this->watchdog_last_frame_count_ &&
             this->watchdog_stall_count_++ >= (UNDERRUN_TIMEOUT_MS / 1000)) {
           ESP_LOGW(TAG, "No audio output for %lus, reconnecting",
@@ -299,15 +299,17 @@ void InternetRadio::init_es8311_() {
   this->codec_if_ = es8311_codec_new(&es_cfg);
   if (!this->codec_if_) {
     ESP_LOGW(TAG, "ES8311 codec not ready, will retry...");
+    audio_codec_delete_ctrl_if(ctrl);
+    audio_codec_delete_gpio_if(gpio);
     return;
   }
 
   // es8311_codec_new() already calls open() internally.
-  // Enable DAC output and configure sample format.
+  // Enable DAC output and configure for current stream sample rate.
   this->codec_if_->enable(this->codec_if_, true);
 
   esp_codec_dev_sample_info_t fs = {};
-  fs.sample_rate = 44100;
+  fs.sample_rate = this->current_sample_rate_;
   fs.channel = 2;
   fs.bits_per_sample = 16;
   fs.mclk_multiple = 256;
@@ -318,7 +320,8 @@ void InternetRadio::init_es8311_() {
   this->sw_vol_gain_ = map_vol_q8_(this->vol_);
   ESP_LOGI(TAG, "ES8311: vol_step=%d q8=%d", (int)this->vol_, (int)this->sw_vol_gain_);
 
-  ESP_LOGI(TAG, "ES8311 initialized (44100Hz stereo 16-bit)");
+  ESP_LOGI(TAG, "ES8311 initialized (%luHz stereo 16-bit)",
+           (unsigned long)this->current_sample_rate_);
 }
 
 void InternetRadio::init_player_() {
@@ -399,10 +402,11 @@ int InternetRadio::pcm_output_cb_(uint8_t *data, int size, void *ctx) {
   }
 
   // 4. Write to I2S bridge (BT speaker) if active
-  if (i2s_bridge::I2SBridge::is_active()) {
+  // Snapshot handle to avoid race with Core 1 teardown (deinit_i2s_ nulls tx_handle_)
+  i2s_chan_handle_t bridge_tx = i2s_bridge::I2SBridge::get_tx_handle();
+  if (i2s_bridge::I2SBridge::is_active() && bridge_tx) {
     size_t bw = 0;
-    i2s_channel_write(i2s_bridge::I2SBridge::get_tx_handle(),
-                      data, size, &bw, pdMS_TO_TICKS(10));
+    i2s_channel_write(bridge_tx, data, size, &bw, pdMS_TO_TICKS(10));
   }
 
   // 5. Watchdog frame count
@@ -535,7 +539,6 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
   if (call.get_media_url().has_value()) {
     const std::string &url = *call.get_media_url();
     ESP_LOGI(TAG, "Play URL: %s", url.c_str());
-    strlcpy(this->pending_url_, url.c_str(), sizeof(this->pending_url_));
     this->id3_artist_[0] = '\0';
     this->id3_title_[0] = '\0';
     int write_idx = 1 - this->title_read_idx_;
@@ -549,12 +552,12 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
       }
       // Add codec hint for extensionless URLs
       char uri_buf[300];
-      const char *ext = strrchr(this->pending_url_, '.');
+      const char *ext = strrchr(url.c_str(), '.');
       bool needs_hint = !ext || strchr(ext, '/');
       if (needs_hint) {
-        snprintf(uri_buf, sizeof(uri_buf), "%s#.aac", this->pending_url_);
+        snprintf(uri_buf, sizeof(uri_buf), "%s#.aac", url.c_str());
       } else {
-        strlcpy(uri_buf, this->pending_url_, sizeof(uri_buf));
+        strlcpy(uri_buf, url.c_str(), sizeof(uri_buf));
       }
       esp_gmf_err_t ret = esp_audio_simple_player_run(this->player_, uri_buf, nullptr);
       if (ret == ESP_GMF_ERR_OK) {
@@ -713,6 +716,7 @@ void InternetRadio::connect_station_() {
     if (ret == ESP_GMF_ERR_OK) {
       this->player_running_ = true;
       this->play_state_ = PS_PLAYING;
+      this->stream_failed_ = false;
     } else {
       ESP_LOGE(TAG, "Failed to start player: %d", ret);
       this->play_state_ = PS_STOPPED;
@@ -720,7 +724,6 @@ void InternetRadio::connect_station_() {
     }
   }
 
-  this->stream_failed_ = false;
   this->watchdog_stall_count_ = 0;
 
   // Enable PA (deferred 200ms) — only if BT bridge isn't active
