@@ -114,25 +114,9 @@ bool spectrum_compute() {
   return true;
 }
 
-// Strong override of the library's weak callback (called on Core 0).
-// C++ linkage to match Audio.h declaration — no extern "C".
-// Only accumulates mono samples — zero FFT work on audio core.
-void audio_process_raw_samples(int32_t *outBuff, int16_t validSamples) {
-  if (!spectrum_ready) return;
-
-  float *buf = sample_bufs[write_buf_];
-  for (int i = 0; i < validSamples; i++) {
-    // Mix stereo to mono — samples are 16-bit values in int32 containers
-    float l = (float)(outBuff[i * 2] >> 16);
-    float r = (float)(outBuff[i * 2 + 1] >> 16);
-    buf[accum_idx] = (l + r) * 0.5f;
-
-    if (++accum_idx >= FFT_N) {
-      // Buffer full — reset index BEFORE flip so Core 1 never sees stale state
-      accum_idx = 0;
-      write_buf_ = 1 - write_buf_;
-      buf = sample_bufs[write_buf_];
-      sample_ready = true;  // signal Core 1 last
-    }
-  }
-}
+// Strong override of the library's weak callback — STUB for ESP-IDF migration.
+// The weak override pattern is removed (no ESP32-audioI2S library).
+// Will be fed from PCM tap audio element in ESP-ADF (Step 3).
+// Keeping the function signature for reference.
+//
+// void audio_process_raw_samples(int32_t *outBuff, int16_t validSamples) { ... }

@@ -1,11 +1,8 @@
 """ESPHome media_player platform: internet_radio."""
-from pathlib import Path
 
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.components import media_player, esp32, text_sensor, select
-from esphome.components.esp32 import ARDUINO_LIBRARY_IDF_COMPONENTS
-from esphome.components.esp32.const import KEY_ESP32, KEY_ARDUINO_LIBRARIES
 from esphome.const import CONF_ID
 from esphome.core import CORE
 from esphome.components.internet_radio import internet_radio_ns
@@ -48,36 +45,8 @@ async def to_code(config):
     await cg.register_component(var, config)
     await media_player.register_media_player(var, config)
 
-    # ESP32-audioI2S needs esp_driver_i2s (excluded by default in ESPHome).
-    # Un-exclude it from both cmake EXCLUDE_COMPONENTS and idf_component.yml stubs.
-    idf_deps = ("esp_driver_i2s",)
-    ARDUINO_LIBRARY_IDF_COMPONENTS["ESP32-audioI2S"] = idf_deps
-    CORE.data[KEY_ESP32][KEY_ARDUINO_LIBRARIES].add("ESP32-audioI2S")
-    for dep in idf_deps:
-        esp32.include_builtin_idf_component(dep)
-
-    # Enable Arduino libraries that Audio.h includes unconditionally.
-    # ESPHome disables them by default (CONFIG_ARDUINO_SELECTIVE_*).
-    for lib in ("FFat", "SD", "SD_MMC", "WiFi", "NetworkClientSecure", "Network", "FS", "SPI"):
-        CORE.data[KEY_ESP32][KEY_ARDUINO_LIBRARIES].add(lib)
-
-    # ESPHome sets lib_ldf_mode=off, so Arduino framework library headers
-    # aren't auto-discovered. Add -I flags for libraries Audio.h needs.
-    arduino_fw = Path.home() / ".platformio" / "packages" / "framework-arduinoespressif32"
-    for lib in ("FFat", "FS", "SD", "SD_MMC", "WiFi", "Network", "NetworkClientSecure", "SPI"):
-        lib_src = arduino_fw / "libraries" / lib / "src"
-        if lib_src.exists():
-            cg.add_build_flag(f"-I{lib_src}")
-
-    # esp_dsp stub: Audio.h includes esp_dsp.h but we don't use EQ/FFT.
-    # Point -I at our stub directory BEFORE the real (non-existent) one.
-    stubs_dir = Path(__file__).parent / "stubs"
-    cg.add_build_flag(f"-I{stubs_dir}")
-
-    # Patch Audio library: httpPrint() sends Icy-MetaData:2 on redirects,
-    # which makes Amperwave/Audacy CDN disable ICY metadata entirely.
-    patch_script = Path(__file__).parent / "patch_audio_lib.py"
-    cg.add_platformio_option("extra_scripts", [f"pre:{patch_script}"])
+    # ESP-IDF: un-exclude esp_driver_i2s (still needed for I2S bridge)
+    esp32.include_builtin_idf_component("esp_driver_i2s")
 
     cg.add(var.set_i2s_bclk_pin(config[CONF_I2S_BCLK_PIN]))
     cg.add(var.set_i2s_lrclk_pin(config[CONF_I2S_LRCLK_PIN]))

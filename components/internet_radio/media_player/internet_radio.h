@@ -13,7 +13,6 @@
 #include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/components/select/select.h"
 
-#include <Audio.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -57,7 +56,6 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   void set_station_select(select::Select *s) { this->station_select_ = s; }
 
   // Public accessors for bridge component and template entities
-  Audio &get_audio() { return this->audio_; }
   volatile PlayState &get_play_state() { return this->play_state_; }
   int get_current_station() const { return this->current_station_; }
   const char *get_song_title() const { return this->title_bufs_[this->title_read_idx_]; }
@@ -89,13 +87,10 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
  protected:
   void control(const media_player::MediaPlayerCall &call) override;
 
-  // Audio callback (static, registered with Audio library)
-  static void audio_callback(Audio::msg_t msg);
+  // FreeRTOS audio task (static, pinned to Core 0) — placeholder for ESP-ADF
+  // static void audio_task(void *param);
 
-  // FreeRTOS audio task (static, pinned to Core 0)
-  static void audio_task(void *param);
-
-  // Singleton for callbacks (Audio lib uses C-style function pointer)
+  // Singleton for callbacks
   static InternetRadio *instance_;
 
   void connect_station_();
@@ -105,8 +100,8 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   void update_id3_song_title_();
   void publish_station_select_();
 
-  // Audio engine
-  Audio audio_;
+  // Audio engine — will be ESP-ADF pipeline in Step 2
+  // (no audio backend in Step 1)
 
   // Pin configuration
   int bclk_pin_{17};

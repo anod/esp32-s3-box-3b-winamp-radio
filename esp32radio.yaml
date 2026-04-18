@@ -5,27 +5,27 @@ esphome:
   name: esp32radio
   friendly_name: "ESP32 Radio"
   platformio_options:
-    lib_deps:
-      - https://github.com/schreibfaul1/ESP32-audioI2S.git
     build_flags:
       - -O2
-      - -DARDUINO_ESP32_S3_BOX
       - -DBOARD_HAS_PSRAM
-      - -DCORE_DEBUG_LEVEL=2
 
 esp32:
   board: esp32s3box
   flash_size: 16MB
   cpu_frequency: 240MHz
   framework:
-    type: arduino
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240: "y"
 
 psram:
   mode: octal
   speed: 80MHz
 
 external_components:
-  - source: github://anod/esp32-s3-box-3b-winamp-radio@main
+  - source:
+      type: local
+      path: components
 
 logger:
   level: DEBUG
@@ -47,14 +47,8 @@ i2c:
   scl: GPIO18
   scan: false
 
-# ES8311 codec — replaces custom 394-LOC driver
-audio_dac:
-  - platform: es8311
-    id: es8311_dac
-    bits_per_sample: 16bit
-    sample_rate: 44100
-    use_mclk: true
-    use_microphone: false
+# ES8311 codec — configured via custom I2C init (audio_dac: es8311 is Arduino-only)
+# Codec registers are written in internet_radio setup() using ESPHome I2C bus
 
 # --- Custom Components ---
 

@@ -116,25 +116,21 @@ void InternetRadio::setup() {
     gpio_set_level(gpio, 0);
   }
 
-  // Configure Audio library
-  Audio::audio_info_callback = audio_callback;
-  this->audio_.setPinout(this->bclk_pin_, this->lrclk_pin_, this->dout_pin_, this->mclk_pin_);
-  this->audio_.setVolumeSteps(100);
-  this->audio_.setVolume(map_volume_(this->vol_));
-  this->audio_.setConnectionTimeout(5000, 0);
+  // Configure Audio library — STUB: no audio backend yet (ESP-ADF in Step 2)
+  // Audio::audio_info_callback = audio_callback;
+  // this->audio_.setPinout(...);
+  // this->audio_.setVolumeSteps(100);
+  // this->audio_.setVolume(map_volume_(this->vol_));
+  // this->audio_.setConnectionTimeout(5000, 0);
 
   // Set initial HA state
   this->volume = (float)this->vol_ / 21.0f;
   this->state = media_player::MEDIA_PLAYER_STATE_IDLE;
 
-  // Don't connect yet — wait for WiFi in loop()
-  ESP_LOGI(TAG, "Waiting for WiFi before streaming...");
+  ESP_LOGI(TAG, "Audio backend: STUB (no playback — ESP-ADF pending)");
 
-  // Launch audio task on Core 0
-  // Audio task on Core 0 — priority 5 to preempt lower-priority tasks
-  xTaskCreatePinnedToCore(audio_task, "audio", 12288, this, 5, nullptr, 0);
-
-  ESP_LOGI(TAG, "Audio task started on Core 0");
+  // Audio task on Core 0 — STUB: not launched until ESP-ADF is integrated
+  // xTaskCreatePinnedToCore(audio_task, "audio", 12288, this, 5, nullptr, 0);
 }
 
 // ─── Loop (Core 1 — ESPHome main loop) ───────────────────
@@ -215,27 +211,9 @@ void InternetRadio::loop() {
   }
 }
 
-// ─── Audio task (Core 0) ──────────────────────────────────
-
-void InternetRadio::audio_task(void *param) {
-  auto *self = static_cast<InternetRadio *>(param);
-  for (;;) {
-    if (self->pending_stop_) {
-      self->pending_stop_ = false;
-      self->audio_.stopSong();
-    }
-    if (self->pending_pause_) {
-      self->pending_pause_ = false;
-      self->audio_.pauseResume();
-    }
-    if (self->pending_connect_) {
-      self->pending_connect_ = false;
-      self->audio_.connecttohost(self->pending_url_);
-    }
-    self->audio_.loop();
-    vTaskDelay(1);
-  }
-}
+// ─── Audio task (Core 0) — STUB ───────────────────────────
+// Will be replaced by ESP-ADF pipeline tasks in Step 2.
+// No audio_task launched — pipeline manages its own tasks.
 
 // ─── MediaPlayer interface ────────────────────────────────
 
@@ -265,8 +243,7 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
     this->vol_ = (int)(v * 21.0f + 0.5f);
     if (this->vol_ < 0) this->vol_ = 0;
     if (this->vol_ > 21) this->vol_ = 21;
-    // setVolume is safe to call cross-core
-    this->audio_.setVolume(map_volume_(this->vol_));
+    // STUB: no audio backend — volume will be set via ES8311 I2C in Step 2
     this->volume = v;
     this->mark_vol_dirty_();
     ESP_LOGD(TAG, "Volume: %d (%.0f%%)", (int)this->vol_, v * 100);
@@ -274,20 +251,16 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
 
   if (call.get_media_url().has_value()) {
     const std::string &url = *call.get_media_url();
-    ESP_LOGI(TAG, "Play URL: %s", url.c_str());
+    ESP_LOGI(TAG, "Play URL: %s (STUB: no audio)", url.c_str());
     strlcpy(this->pending_url_, url.c_str(), sizeof(this->pending_url_));
     this->id3_artist_[0] = '\0';
     this->id3_title_[0] = '\0';
     int write_idx = 1 - this->title_read_idx_;
-    strlcpy(this->title_bufs_[write_idx], "Connecting...", 128);
+    strlcpy(this->title_bufs_[write_idx], "No audio backend", 128);
     this->title_read_idx_ = write_idx;
-    this->play_state_ = PS_PLAYING;
-    this->pending_connect_ = true;
-    this->watchdog_stall_count_ = 0;  // reset underrun watchdog
-    if (this->pa_pin_ >= 0 && !i2s_bridge::I2SBridge::is_active()) {
-      this->pa_pending_ms_ = millis();
-      this->pa_pending_ = true;
-    }
+    // STUB: stay IDLE
+    this->play_state_ = PS_STOPPED;
+    this->watchdog_stall_count_ = 0;
   }
 
   if (call.get_command().has_value()) {
@@ -347,7 +320,7 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
         int v = this->vol_ + 1;
         if (v > 21) v = 21;
         this->vol_ = v;
-        this->audio_.setVolume(map_volume_(v));
+        // STUB: no audio backend
         this->volume = (float)v / 21.0f;
         this->mark_vol_dirty_();
         break;
@@ -357,7 +330,7 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
         int v = this->vol_ - 1;
         if (v < 0) v = 0;
         this->vol_ = v;
-        this->audio_.setVolume(map_volume_(v));
+        // STUB: no audio backend
         this->volume = (float)v / 21.0f;
         this->mark_vol_dirty_();
         break;
@@ -366,14 +339,14 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
       case media_player::MEDIA_PLAYER_COMMAND_MUTE:
         if (!this->is_muted_) {
           this->is_muted_ = true;
-          this->audio_.setVolume(0);
+          // STUB: no audio backend
         }
         break;
 
       case media_player::MEDIA_PLAYER_COMMAND_UNMUTE:
         if (this->is_muted_) {
           this->is_muted_ = false;
-          this->audio_.setVolume(map_volume_(this->vol_));
+          // STUB: no audio backend
         }
         break;
 
@@ -396,28 +369,22 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
 // ─── Internal helpers ─────────────────────────────────────
 
 void InternetRadio::connect_station_() {
-  ESP_LOGI(TAG, "Connecting: [%d] %s → %s",
+  ESP_LOGI(TAG, "Station: [%d] %s → %s (STUB: no audio)",
            (int)this->current_station_,
            stations_[this->current_station_].name,
            stations_[this->current_station_].url);
-  // Copy URL before setting flag — eliminates ordering race with Core 0
+  // Copy URL for future use
   strlcpy(this->pending_url_, stations_[this->current_station_].url,
           sizeof(this->pending_url_));
   this->id3_artist_[0] = '\0';
   this->id3_title_[0] = '\0';
-  // Write title to the buffer Core 0 isn't reading
+  // Write station name as title (no stream = no ICY metadata)
   int write_idx = 1 - this->title_read_idx_;
-  strlcpy(this->title_bufs_[write_idx], "Connecting...", 128);
+  strlcpy(this->title_bufs_[write_idx], stations_[this->current_station_].name, 128);
   this->title_read_idx_ = write_idx;
-  this->play_state_ = PS_PLAYING;
-  this->pending_connect_ = true;
-  // Reset underrun watchdog — give the new connection time to start producing audio
+  // STUB: stay IDLE since no audio backend
+  this->play_state_ = PS_STOPPED;
   this->watchdog_stall_count_ = 0;
-  // Non-blocking PA enable — schedule for 200ms from now
-  if (this->pa_pin_ >= 0 && !i2s_bridge::I2SBridge::is_active()) {
-    this->pa_pending_ms_ = millis();
-    this->pa_pending_ = true;
-  }
 }
 
 void InternetRadio::next_station_() {
@@ -451,7 +418,7 @@ void InternetRadio::set_volume_direct(int vol) {
   if (vol < 0) vol = 0;
   if (vol > 21) vol = 21;
   this->vol_ = vol;
-  this->audio_.setVolume(map_volume_(vol));
+  // STUB: no audio backend — volume will be set via ES8311 I2C in Step 2
   this->volume = (float)vol / 21.0f;
   this->is_muted_ = (vol == 0);
   this->mark_vol_dirty_();
@@ -534,96 +501,8 @@ void InternetRadio::update_id3_song_title_() {
   this->title_read_idx_ = wi;
 }
 
-// ─── Audio callbacks (runs on Core 0) ─────────────────────
-
-void InternetRadio::audio_callback(Audio::msg_t msg) {
-  if (!instance_) return;
-  auto *self = instance_;
-
-  switch (msg.e) {
-    case Audio::evt_info:
-      // Only log at VERBOSE level — UART blocking on Core 0 causes dropouts.
-      // BitRate/SampleRate are still parsed below without logging.
-      ESP_LOGV(TAG, "info: %s", msg.msg);
-      if (msg.msg && strncmp(msg.msg, "BitRate:", 8) == 0) {
-        long br = atol(msg.msg + 8);
-        if (br > 0) {
-          self->bitrate_ = (br >= 1000) ? br / 1000 : br;
-        }
-      }
-      if (msg.msg && strncmp(msg.msg, "SampleRate (Hz):", 16) == 0) {
-        uint32_t sr = atol(msg.msg + 16);
-        if (sr > 0) {
-          i2s_bridge::I2SBridge::bridge_sample_rate = sr;
-        }
-      }
-      break;
-
-    case Audio::evt_streamtitle:
-      ESP_LOGV(TAG, "title: %s", msg.msg);
-      if (msg.msg && msg.msg[0] != '\0') {
-        int wi = 1 - self->title_read_idx_;
-        strlcpy(self->title_bufs_[wi], msg.msg, 128);
-        self->title_read_idx_ = wi;
-      }
-      break;
-
-    case Audio::evt_name:
-      ESP_LOGV(TAG, "station: %s", msg.msg);
-      self->play_state_ = PS_PLAYING;
-      {
-        const char *cur = self->title_bufs_[self->title_read_idx_];
-        if (cur[0] == '\0' || strcmp(cur, "Connecting...") == 0) {
-          int wi = 1 - self->title_read_idx_;
-          strlcpy(self->title_bufs_[wi], msg.msg, 128);
-          self->title_read_idx_ = wi;
-        }
-      }
-      break;
-
-    case Audio::evt_id3data:
-      ESP_LOGV(TAG, "id3: %s", msg.msg);
-      if (msg.msg) {
-        if (strncmp(msg.msg, "Title: ", 7) == 0) {
-          strlcpy(self->id3_title_, msg.msg + 7, sizeof(self->id3_title_));
-          self->update_id3_song_title_();
-        } else if (strncmp(msg.msg, "Artist: ", 8) == 0) {
-          strlcpy(self->id3_artist_, msg.msg + 8, sizeof(self->id3_artist_));
-          self->update_id3_song_title_();
-        }
-      }
-      break;
-
-    case Audio::evt_bitrate:
-      if (msg.msg) {
-        long br = atol(msg.msg);
-        if (br > 0) {
-          self->bitrate_ = (br >= 1000) ? br / 1000 : br;
-        }
-      }
-      break;
-
-    case Audio::evt_eof:
-      ESP_LOGV(TAG, "Stream ended");
-      self->play_state_ = PS_STOPPED;
-      self->stream_failed_ = true;
-      self->last_retry_ms_ = millis();
-      break;
-
-    case Audio::evt_log:
-      ESP_LOGV(TAG, "log: %s", msg.msg);
-      if (msg.msg && (strstr(msg.msg, "failed") || strstr(msg.msg, "error"))) {
-        // Don't log here — UART on Core 0 causes audio jitter.
-        // Core 1's retry logic logs when it reconnects.
-        self->stream_failed_ = true;
-        self->last_retry_ms_ = millis();
-      }
-      break;
-
-    default:
-      break;
-  }
-}
+// ─── Audio callbacks — STUB ───────────────────────────────
+// Will be replaced by ESP-ADF event handling in Step 2.
 
 }  // namespace internet_radio
 }  // namespace esphome
