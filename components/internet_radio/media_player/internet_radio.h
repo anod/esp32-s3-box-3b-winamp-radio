@@ -14,12 +14,14 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <atomic>
 #include "driver/i2s_std.h"
 
 // ESP-GMF audio player
 #include "esp_audio_simple_player.h"
 #include "esp_audio_simple_player_advance.h"
 #include "esp_gmf_io_http.h"
+#include "esp_http_client.h"
 
 // ES8311 codec
 #include "esp_codec_dev_defaults.h"
@@ -67,7 +69,7 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   // Public accessors for bridge component and template entities
   volatile PlayState &get_play_state() { return this->play_state_; }
   int get_current_station() const { return this->current_station_; }
-  const char *get_song_title() const { return this->title_bufs_[this->title_read_idx_]; }
+  const char *get_song_title() const { return this->title_bufs_[this->title_read_idx_.load(std::memory_order_acquire)]; }
   const char *get_station_name() const { return stations_[this->current_station_].name; }
   long get_bitrate() const { return this->bitrate_; }
   int get_vol() const { return this->vol_; }
@@ -116,6 +118,10 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   static int pcm_output_cb_(uint8_t *data, int size, void *ctx);
   static int player_event_cb_(esp_asp_event_pkt_t *pkt, void *ctx);
   static int http_event_cb_(http_stream_event_msg_t *msg);
+
+  // ICY metadata helpers (Core 0)
+  void parse_icy_metadata_();
+  int icy_read_(esp_http_client_handle_t client, char *out, int out_len);
 
   // ESP-GMF player handle
   esp_asp_handle_t player_{nullptr};
@@ -171,7 +177,7 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   // Double-buffered song title: Core 0 writes to write buf, then flips index.
   // Core 1 reads from read buf. Avoids torn reads without mutex.
   char title_bufs_[2][128]{};
-  volatile int title_read_idx_{0};  // index Core 1 reads from
+  std::atomic<int> title_read_idx_{0};  // index Core 1 reads from (acquire/release)
 
   // Non-blocking PA enable (avoids 200ms delay in main loop)
   // Written from Core 0 (player_event_cb_), read/cleared on Core 1

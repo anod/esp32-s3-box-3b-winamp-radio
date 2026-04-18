@@ -227,7 +227,7 @@ void InternetRadio::loop() {
   this->flush_vol_if_dirty_();
 
   // Publish state changes to HA (reads from stable title buffer)
-  const char *title = this->title_bufs_[this->title_read_idx_];
+  const char *title = this->title_bufs_[this->title_read_idx_.load(std::memory_order_acquire)];
   bool title_changed = strcmp(title, this->last_published_title_) != 0;
   if (this->play_state_ != this->last_published_state_ || title_changed) {
     this->update_ha_state_();
@@ -371,6 +371,84 @@ void InternetRadio::init_http_io_() {
 
 // ─── HTTP event callback (Core 0) — ICY metadata extraction ──
 
+// Extract StreamTitle from ICY metadata block, publish to title double-buffer.
+void InternetRadio::parse_icy_metadata_() {
+  icy_meta_buf_[icy_meta_idx_] = '\0';
+  if (icy_meta_idx_ == 0) return;
+
+  const char *st = strstr(icy_meta_buf_, "StreamTitle='");
+  if (!st) return;
+  st += 13;  // skip "StreamTitle='"
+  const char *end = strstr(st, "';");
+  int len = end ? (int)(end - st) : (int)strlen(st);
+  if (len <= 0 || len >= 128) return;
+
+  // Write to double-buffer (Core 0 → Core 1 via acquire/release)
+  int wi = 1 - title_read_idx_.load(std::memory_order_relaxed);
+  if (strncmp(title_bufs_[wi], st, len) == 0 && title_bufs_[wi][len] == '\0') return;
+  memcpy(title_bufs_[wi], st, len);
+  title_bufs_[wi][len] = '\0';
+  title_read_idx_.store(wi, std::memory_order_release);
+  ESP_LOGI(TAG, "ICY: %s", title_bufs_[wi]);
+}
+
+// Read from HTTP stream, stripping interleaved ICY metadata.
+// Returns bytes of clean audio written to out, 0 on EOF, -1 on error.
+int InternetRadio::icy_read_(esp_http_client_handle_t client, char *out, int out_len) {
+  int out_pos = 0;
+  int last_rd = 0;
+
+  while (out_pos < out_len) {
+    if (icy_meta_remaining_ > 0) {
+      // Inside metadata block — consume into icy_meta_buf_
+      char tmp[256];
+      int to_read = icy_meta_remaining_;
+      if (to_read > (int)sizeof(tmp)) to_read = (int)sizeof(tmp);
+      last_rd = esp_http_client_read(client, tmp, to_read);
+      if (last_rd <= 0) break;
+      int space = (int)sizeof(icy_meta_buf_) - 1 - icy_meta_idx_;
+      if (space > 0) {
+        int n = last_rd < space ? last_rd : space;
+        memcpy(icy_meta_buf_ + icy_meta_idx_, tmp, n);
+        icy_meta_idx_ += n;
+      }
+      icy_meta_remaining_ -= last_rd;
+      if (icy_meta_remaining_ <= 0) {
+        parse_icy_metadata_();
+        icy_meta_idx_ = 0;
+        icy_remaining_ = icy_metaint_;
+      }
+      continue;
+    }
+
+    if (icy_remaining_ == 0) {
+      // Read 1-byte metadata length prefix
+      char len_byte = 0;
+      last_rd = esp_http_client_read(client, &len_byte, 1);
+      if (last_rd <= 0) break;
+      int meta_len = (uint8_t)len_byte * 16;
+      if (meta_len > 0) {
+        icy_meta_remaining_ = meta_len;
+        icy_meta_idx_ = 0;
+      } else {
+        icy_remaining_ = icy_metaint_;
+      }
+      continue;
+    }
+
+    // Read audio data up to next metadata boundary
+    int want = out_len - out_pos;
+    if (icy_remaining_ < want) want = icy_remaining_;
+    last_rd = esp_http_client_read(client, out + out_pos, want);
+    if (last_rd <= 0) break;
+    out_pos += last_rd;
+    icy_remaining_ -= last_rd;
+  }
+
+  if (out_pos > 0) return out_pos;
+  return last_rd < 0 ? -1 : 0;  // propagate EOF vs error
+}
+
 int InternetRadio::http_event_cb_(http_stream_event_msg_t *msg) {
   auto *self = static_cast<InternetRadio *>(msg->user_data);
 
@@ -391,10 +469,10 @@ int InternetRadio::http_event_cb_(http_stream_event_msg_t *msg) {
   if (msg->event_id == HTTP_STREAM_ON_RESPONSE) {
     auto client = static_cast<esp_http_client_handle_t>(msg->http_client);
 
-    // On first read, check for icy-metaint response header
+    // On first response, check for icy-metaint header
     if (!self->icy_header_checked_) {
       self->icy_header_checked_ = true;
-      int metaint = g_icy_metaint;  // read value captured by patched GMF handler
+      int metaint = g_icy_metaint;
       if (metaint > 0) {
         self->icy_metaint_ = metaint;
         self->icy_remaining_ = metaint;
@@ -404,86 +482,8 @@ int InternetRadio::http_event_cb_(http_stream_event_msg_t *msg) {
       }
     }
 
-    // If no ICY metadata, let the library do its normal read
-    if (self->icy_metaint_ <= 0) return 0;
-
-    // Read raw bytes and strip ICY metadata inline.
-    // We read from esp_http_client ourselves and return clean audio bytes.
-    char *out = static_cast<char *>(msg->buffer);
-    int out_len = msg->buffer_len;
-    int out_pos = 0;
-
-    while (out_pos < out_len) {
-      if (self->icy_meta_remaining_ > 0) {
-        // Currently inside a metadata block — read and discard/collect
-        int to_read = self->icy_meta_remaining_;
-        char tmp[256];
-        if (to_read > (int)sizeof(tmp)) to_read = (int)sizeof(tmp);
-        int rd = esp_http_client_read(client, tmp, to_read);
-        if (rd <= 0) break;
-        // Collect metadata text
-        for (int i = 0; i < rd && self->icy_meta_idx_ < (int)sizeof(self->icy_meta_buf_) - 1; i++) {
-          self->icy_meta_buf_[self->icy_meta_idx_++] = tmp[i];
-        }
-        self->icy_meta_remaining_ -= rd;
-        if (self->icy_meta_remaining_ <= 0) {
-          // Metadata block complete — parse StreamTitle
-          self->icy_meta_buf_[self->icy_meta_idx_] = '\0';
-          if (self->icy_meta_idx_ > 0) {
-            // Parse "StreamTitle='...'; "
-            const char *st = strstr(self->icy_meta_buf_, "StreamTitle='");
-            if (st) {
-              st += 13;  // skip "StreamTitle='"
-              const char *end = strstr(st, "';");
-              if (!end) end = st + strlen(st);
-              int len = end - st;
-              if (len > 0 && len < 127) {
-                char title[128];
-                memcpy(title, st, len);
-                title[len] = '\0';
-                // Write to double-buffer (Core 0 side)
-                int wi = 1 - self->title_read_idx_;
-                if (strcmp(self->title_bufs_[wi], title) != 0) {
-                  strlcpy(self->title_bufs_[wi], title, 128);
-                  self->title_read_idx_ = wi;
-                  ESP_LOGI(TAG, "ICY: %s", title);
-                }
-              }
-            }
-          }
-          self->icy_meta_idx_ = 0;
-          self->icy_remaining_ = self->icy_metaint_;  // reset audio counter for next interval
-        }
-        continue;
-      }
-
-      if (self->icy_remaining_ == 0) {
-        // Read the 1-byte metadata length prefix
-        char len_byte = 0;
-        int rd = esp_http_client_read(client, &len_byte, 1);
-        if (rd <= 0) break;
-        int meta_len = (uint8_t)len_byte * 16;
-        if (meta_len > 0) {
-          self->icy_meta_remaining_ = meta_len;
-          self->icy_meta_idx_ = 0;
-        } else {
-          // No metadata this interval
-          self->icy_remaining_ = self->icy_metaint_;
-        }
-        continue;
-      }
-
-      // Read audio data up to next metadata boundary
-      int audio_avail = self->icy_remaining_;
-      int want = out_len - out_pos;
-      if (audio_avail < want) want = audio_avail;
-      int rd = esp_http_client_read(client, out + out_pos, want);
-      if (rd <= 0) break;
-      out_pos += rd;
-      self->icy_remaining_ -= rd;
-    }
-
-    return out_pos > 0 ? out_pos : -1;
+    if (self->icy_metaint_ <= 0) return 0;  // no ICY — let library read normally
+    return self->icy_read_(client, static_cast<char *>(msg->buffer), msg->buffer_len);
   }
 
   return 0;
@@ -658,9 +658,9 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
     ESP_LOGI(TAG, "Play URL: %s", url.c_str());
     this->id3_artist_[0] = '\0';
     this->id3_title_[0] = '\0';
-    int write_idx = 1 - this->title_read_idx_;
+    int write_idx = 1 - this->title_read_idx_.load(std::memory_order_relaxed);
     strlcpy(this->title_bufs_[write_idx], "Connecting...", 128);
-    this->title_read_idx_ = write_idx;
+    this->title_read_idx_.store(write_idx, std::memory_order_release);
     // Play the URL directly via ESP-GMF
     if (this->player_) {
       if (this->player_running_) {
@@ -808,9 +808,9 @@ void InternetRadio::connect_station_() {
   // Write station name as initial title (ICY metadata will override)
   this->id3_artist_[0] = '\0';
   this->id3_title_[0] = '\0';
-  int write_idx = 1 - this->title_read_idx_;
+  int write_idx = 1 - this->title_read_idx_.load(std::memory_order_relaxed);
   strlcpy(this->title_bufs_[write_idx], stations_[this->current_station_].name, 128);
-  this->title_read_idx_ = write_idx;
+  this->title_read_idx_.store(write_idx, std::memory_order_release);
 
   // ESP-GMF detects codec from URI extension (strrchr for '.').
   // Extensionless URLs (Amperwave, Audacy, etc.) need a hint fragment.
@@ -921,7 +921,7 @@ void InternetRadio::update_ha_state_() {
   this->volume = (float)this->vol_ / 21.0f;
   this->publish_state();
   this->last_published_state_ = this->play_state_;
-  const char *title = this->title_bufs_[this->title_read_idx_];
+  const char *title = this->title_bufs_[this->title_read_idx_.load(std::memory_order_acquire)];
   strlcpy(this->last_published_title_, title, sizeof(this->last_published_title_));
 }
 
@@ -961,10 +961,10 @@ void InternetRadio::update_id3_song_title_() {
   } else {
     return;
   }
-  int wi = 1 - this->title_read_idx_;
+  int wi = 1 - this->title_read_idx_.load(std::memory_order_relaxed);
   if (strcmp(this->title_bufs_[wi], combined) == 0) return;
   strlcpy(this->title_bufs_[wi], combined, 128);
-  this->title_read_idx_ = wi;
+  this->title_read_idx_.store(wi, std::memory_order_release);
 }
 
 }  // namespace internet_radio

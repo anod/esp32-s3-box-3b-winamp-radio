@@ -4,7 +4,7 @@
 
 ## Project Overview
 
-ESPHome-based internet radio for the ESP32-S3-BOX-3. Custom external components in `components/` handle audio streaming, BT speaker bridge, and Winamp 2 display. ESPHome provides OTA, native HA API, and WiFi management.
+ESPHome-based internet radio for the ESP32-S3-BOX-3. Uses ESP-IDF framework with ESP-GMF audio pipeline. Custom external components in `components/` handle audio streaming (HTTP→decoder→PCM→I2S), BT speaker bridge, and Winamp 2 display. ESPHome provides OTA, native HA API, and WiFi management.
 
 - **ESPHome firmware** (repo root): `esp32radio.yaml` config + `components/` custom external components for audio streaming, BT speaker bridge, and Winamp 2 display.
 - **BT bridge firmware** (`bt-bridge/`): Separate PlatformIO project for ESP32-WROOM-32D (I2S→A2DP bridge, builds independently).
@@ -31,10 +31,12 @@ components/
 ├── internet_radio/              # Parent namespace package
 │   ├── __init__.py              # Defines internet_radio_ns
 │   └── media_player/
-│       ├── __init__.py          # Schema, codegen, IDF workarounds
+│       ├── __init__.py          # Schema, codegen, IDF component deps
 │       ├── internet_radio.h     # MediaPlayer subclass
-│       ├── internet_radio.cpp
-│       └── stubs/esp_dsp.h      # Stub for unused Audio.h dependency
+│       ├── internet_radio.cpp   # ESP-GMF pipeline, ICY metadata, volume
+│       ├── patch_gmf_http.py    # Pre-build: patches GMF for ICY header capture
+│       ├── patch_audio_lib.py   # Pre-build: legacy (inactive with ESP-GMF)
+│       └── stubs/esp_dsp.h      # Stub (legacy, may be removed)
 ├── i2s_bridge/
 │   ├── __init__.py              # Defines i2s_bridge_ns
 │   └── switch/
@@ -47,42 +49,51 @@ components/
     ├── winamp_display.h         # Component + I2CDevice
     ├── winamp_display.cpp       # Rendering (~200 LOC draw_frame_)
     ├── winamp_touch.cpp         # Touch via ESPHome I2C bus
-    └── spectrum.cpp             # FFT visualizer (separate TU, weak override)
+    └── spectrum.cpp             # FFT visualizer (separate TU)
 ```
 
 ### Core Threading Model
 
-- **Core 0**: Dedicated FreeRTOS audio task — calls `audio.loop()` continuously, consumes pending flags
-- **Core 1**: ESPHome main loop — UI rendering (~15fps), touch input, WiFi, HA API
-- **Cross-core rule**: Audio-library methods (`connecttohost`, `pauseResume`, `stopSong`) must ONLY be called from Core 0. Core 1 sets volatile flags that the audio task consumes.
-- `audio.setVolume()` is the ONLY method safe to call cross-core.
+- **Core 0**: ESP-GMF worker thread — runs HTTP fetch, decoder, and calls our PCM output + HTTP event callbacks
+- **Core 1**: ESPHome main loop — UI rendering (~15fps), touch input, WiFi, HA API, player control
+- **Control flow**: Core 1 calls `esp_audio_simple_player_play/stop/pause/resume()` directly — ESP-GMF API is thread-safe
+- **Callbacks on Core 0**: `pcm_output_cb_` (volume scaling, I2S write, FFT feed), `http_event_cb_` (ICY metadata), `player_event_cb_` (state changes, sample rate detection)
 
-### Cross-Core Communication Patterns
+### Cross-Core Communication
 
-```
-Core 1 (ESPHome loop)              Core 0 (audio_task)
-─────────────────────              ────────────────────
-strlcpy(pending_url_, url)    →    audio.connecttohost(pending_url_)
-pending_connect_ = true
-
-pending_pause_ = true          →    audio.pauseResume()
-pending_stop_ = true           →    audio.stopSong()
-audio.setVolume(v)             →    (direct call OK)
-```
-
-**Song title double-buffer**: Core 0 writes to `title_bufs_[1 - title_read_idx_]`, then flips `title_read_idx_`. Core 1 always reads `title_bufs_[title_read_idx_]`. No mutex needed — atomic index swap ensures Core 1 never reads a partially-written buffer.
-
-**Station URL**: Copied to `pending_url_[256]` BEFORE setting `pending_connect_ = true`. Eliminates ordering race where Core 0 could read a stale `current_station_` index.
+- **Song title double-buffer**: `std::atomic<int> title_read_idx_` with acquire/release ordering. Core 0 writes to `title_bufs_[1 - idx]`, then `store(wi, release)`. Core 1 reads `title_bufs_[idx.load(acquire)]`. No mutex needed.
+- **Volume**: `volatile int sw_vol_gain_` (Q8 fixed-point). Core 1 writes, Core 0 reads in `pcm_output_cb_`. Single-word atomic on ESP32.
+- **Play state**: `volatile PlayState play_state_` updated by both cores (Core 0 via `player_event_cb_`, Core 1 via `control()`).
+- **Frame counter**: `volatile uint32_t g_audio_frame_count` incremented in `pcm_output_cb_` on Core 0, read by `loop()` on Core 1 for underrun watchdog.
 
 ### FFT Spectrum Visualizer
 
 Split across two cores for zero audio-path overhead:
 
-- **Core 0** (`audio_process_raw_samples` in `spectrum.cpp`): Lightweight sample capture only — mixes stereo to mono, fills double-buffered accumulator, flips buffer when 128 samples collected. ~microseconds per callback.
+- **Core 0** (`feed_fft_samples` called from `pcm_output_cb_`): Lightweight sample capture — mixes stereo to mono, fills double-buffered accumulator, flips buffer when 128 samples collected. ~microseconds per callback.
 - **Core 1** (`spectrum_compute()` called from `draw_frame_`): Reads completed sample buffer, runs 128-point radix-2 FFT, aggregates into 16 logarithmic frequency bands (magnitude²). ~100μs — negligible within 55-78ms frame time.
 - **Double buffer**: `sample_bufs[2][128]` with volatile `write_buf_` index. Core 0 writes to one buffer, Core 1 reads the other. `sample_ready` flag set last as release signal.
-- **No esp_dsp dependency**: Self-contained FFT using only `<math.h>`. Pre-computed Hann window and twiddle factors. This avoids enabling Audio library's internal FFT/EQ processing (see esp_dsp pitfall).
-- `audio_process_raw_samples` MUST use C++ linkage (no `extern "C"`) and live in its own `.cpp` without `Audio.h` — same weak-symbol rules as `audio_process_i2s`.
+- **No esp_dsp dependency**: Self-contained FFT using only `<math.h>`. Pre-computed Hann window and twiddle factors.
+- `feed_fft_samples` and `audio_process_i2s` MUST live in their own `.cpp` files — weak-symbol overrides require separate translation units.
+
+### Software Volume
+
+- UI volume: 22 discrete steps (0–21), stored in NVS
+- Internal: Q8 fixed-point gain (`sw_vol_gain_`) applied in `pcm_output_cb_` to PCM samples before I2S write
+- Perceptual dB curve: -42 dB (step 1) to +6 dB (step 21), ~2.3 dB/step. Step 18 ≈ unity (0 dB).
+- Pre-computed lookup table `VOL_Q8[22]` — no floating-point math in audio path
+- Clipping handled via `int32_t` intermediate with saturation to `INT16_MIN`/`INT16_MAX`
+
+### ICY/Icecast Metadata
+
+Extracts StreamTitle from Icecast/Shoutcast streams:
+
+- **Request**: `Icy-MetaData: 1` header added in `PRE_REQUEST` callback
+- **Response header**: `icy-metaint: N` captured by patched GMF HTTP handler (stored in `volatile int g_icy_metaint`)
+- **Stream format**: N audio bytes → 1 length byte (×16 = metadata size) → metadata text → repeat
+- **Implementation**: `icy_read_()` state machine strips metadata inline, `parse_icy_metadata_()` extracts StreamTitle
+- **Patch script**: `patch_gmf_http.py` — required because `esp_http_client` has no public API to read response headers (they're dispatched via event callback then freed immediately)
+- Max metadata block: 255 × 16 = 4080 bytes. Buffer is 512 bytes — excess is silently truncated (titles >~500 chars are extremely rare).
 
 ### Component Setup Priority
 
@@ -114,7 +125,7 @@ Even `speaker_source` (the new official ESPHome media player component) has the 
 - Use `button` entities as the workaround for next/prev — they work via `on_press` lambdas
 - The `select` entity for station switching works and should be kept
 - Our C++ code handles `MEDIA_PLAYER_COMMAND_NEXT`/`PREVIOUS` internally (for ESPHome automations/lambdas) — when the protocol is updated, they'll "just work"
-- `speaker_source` is NOT a viable replacement: requires ESP-IDF framework (we use Arduino for ESP32-audioI2S), uses a completely different audio pipeline (ESPHome speaker + media_source), and has the same NEXT/PREV gap
+- `speaker_source` is NOT a viable replacement: uses a completely different audio pipeline (ESPHome speaker + media_source), and has the same NEXT/PREV gap
 
 ## ESPHome Build System
 
@@ -137,19 +148,19 @@ cd bt-bridge && pio run -e bt-bridge  # Build BT bridge firmware
 
 These workarounds are in `__init__.py` files and MUST be preserved:
 
-1. **`esp_driver_i2s` excluded by ESPHome** → Un-exclude via `ARDUINO_LIBRARY_IDF_COMPONENTS` AND `include_builtin_idf_component()`. Both mechanisms must be addressed.
-2. **`esp_lcd` excluded by ESPHome** → `include_builtin_idf_component("esp_lcd")` in winamp_display's `__init__.py`.
-3. **Arduino library headers not auto-discovered** → ESPHome sets `lib_ldf_mode=off`. Add `-I` flags for FFat, FS, SD, WiFi, Network, SPI, etc.
-4. **`esp_dsp.h` missing** → Audio.h includes it for EQ/FFT we don't use. Stub header in `media_player/stubs/`.
-5. **`-DCORE_DEBUG_LEVEL=2`** → Arduino macro not set by ESPHome framework. Required by some libraries.
-6. **LovyanGFX defines** → `-DLGFX_USE_V1` and `-DLGFX_AUTODETECT` MUST be set via `cg.add_build_flag()`, NOT in headers (causes redefinition warnings).
-7. **Platform component schemas** → `media_player`, `switch`, `i2c` CANNOT be listed in `DEPENDENCIES = [...]` — causes import errors. Use `DEPENDENCIES = ["network"]` or `["i2c"]` only for non-platform deps.
-8. **`Icy-MetaData:2` in Audio library** → `httpPrint()` (redirect handler) sends both `Icy-MetaData:1` and `Icy-MetaData:2` headers. Some CDNs (Amperwave/Audacy) disable ICY metadata entirely when they see `:2`, breaking StreamTitle. Pre-build script `patch_audio_lib.py` comments out the `:2` line.
+1. **`esp_driver_i2s` excluded by ESPHome** → `include_builtin_idf_component("esp_driver_i2s")` in internet_radio's `__init__.py`.
+2. **`esp_http_client` excluded by ESPHome** → `include_builtin_idf_component("esp_http_client")` in internet_radio's `__init__.py`.
+3. **`esp_lcd` excluded by ESPHome** → `include_builtin_idf_component("esp_lcd")` in winamp_display's `__init__.py`.
+4. **LovyanGFX defines** → `-DLGFX_USE_V1` and `-DLGFX_AUTODETECT` MUST be set via `cg.add_build_flag()`, NOT in headers (causes redefinition warnings).
+5. **Platform component schemas** → `media_player`, `switch`, `i2c` CANNOT be listed in `DEPENDENCIES = [...]` — causes import errors. Use `DEPENDENCIES = ["network"]` or `["i2c"]` only for non-platform deps.
+6. **GMF ICY metadata patch** → `patch_gmf_http.py` pre-build script patches `esp_gmf_io_http.c` to capture `icy-metaint` response header. The patch is idempotent (checks for marker before applying). Registered via `cg.add_platformio_option("extra_scripts", ...)`.
 
-### Framework Versions
+### Framework & Dependencies
 
-- ESPHome 2026.3.2, pioarduino stable
-- ESP-IDF 5.5.3, Arduino 3.3.7
+- ESPHome 2026.3.2, ESP-IDF framework (no Arduino)
+- ESP-IDF 5.5.3
+- ESP-GMF `esp_audio_simple_player` 0.9.6 (audio pipeline)
+- `esp_codec_dev` 1.5.2 (ES8311 driver)
 - LovyanGFX 1.2.19 (pinned via `cg.add_library`)
 
 ## ESPHome Pitfalls (Hard-Won Lessons)
@@ -180,19 +191,17 @@ ESPHome's `i2c:` component owns I2C bus 0 (GPIO 8/18). LovyanGFX `tft_.init()` t
 ### Audio Sample Rate
 
 - Different streams use different sample rates (44100, 48000, etc.)
-- `I2SBridge::bridge_sample_rate` must be updated when sample rate changes
-- Parse `"SampleRate (Hz):"` from `Audio::evt_info` callback and update the variable
-- If not updated, the I2S bridge resampler won't engage → audio plays at wrong speed ("funny voice")
+- `player_event_cb_` detects sample rate from ESP-GMF codec info events
+- `reconfig_sample_rate_()` updates I2S0 TX channel and `I2SBridge::bridge_sample_rate`
+- If bridge rate not updated, the I2S bridge resampler won't engage → audio plays at wrong speed
 
 ### Buffer Underrun Watchdog
 
-- The ESP32-audioI2S ring buffer can drain completely if the stream stalls (server drop, WiFi hiccup)
-- When this happens, the library logs `bytesWasRead(): readSpace < br` every ~100ms and does `vTaskDelay(100)` — but never fires `evt_eof`
-- The `vTaskDelay(100)` also blocks `audio.loop()`, slowing buffer refill (negative feedback loop)
-- **Solution**: `g_audio_frame_count` volatile counter is incremented by `audio_process_i2s` on Core 0 (single increment — near-zero cost in the audio hot path). `loop()` on Core 1 checks every second: if frame count hasn't advanced for 10 consecutive checks while playing → auto-reconnect via `connect_station_()`
-- The stall counter is reset on every `connect_station_()` and `play_media` call to give new connections time to establish
+- If the HTTP stream stalls (server drop, WiFi hiccup), the ESP-GMF pipeline may stop producing frames
+- **Solution**: `g_audio_frame_count` volatile counter is incremented in `pcm_output_cb_` on Core 0 (single increment — near-zero cost). `loop()` on Core 1 checks every second: if frame count hasn't advanced for 10 consecutive checks while playing → auto-reconnect
+- The stall counter is reset on every `connect_station_()` and `play_media` call
 - Any new code path that starts playback must also reset `watchdog_stall_count_ = 0`
-- Do NOT call `millis()` or other expensive functions inside `audio_process_i2s` or `audio_process_raw_samples` — they run on Core 0's audio hot path and can cause crackling
+- Do NOT call `millis()` or other expensive functions inside `pcm_output_cb_` or `feed_fft_samples` — they run on Core 0's audio path and can cause crackling
 
 ### Non-Blocking PA Enable
 
@@ -219,6 +228,14 @@ See **ESPHome API Protocol Gap** section above for full details. Key rules:
 - `WiFi.localIP()` returns `0.0.0.0` in ESPHome — use `network::get_ip_addresses()[0].str_to()` instead
 - `WiFi.status()` doesn't work — use `network::is_connected()` (which is also inlined in ESPHome 2026.3+)
 - ES8311 sample rate must be set to 44100Hz (not the default 16000Hz)
+
+### esp_http_client Response Headers (CRITICAL)
+
+- `esp_http_client_get_header()` reads **REQUEST** headers only (`client->request->headers`)
+- Response headers are dispatched via `HTTP_EVENT_ON_HEADER` callback then **freed immediately**
+- `client->response->headers` list exists but is **never populated** with response headers
+- There is NO public API to read response headers by name after connection is established
+- This is why we use `patch_gmf_http.py` to intercept headers inside GMF's internal event handler
 
 ### Display Loop Timing
 
@@ -247,7 +264,7 @@ Separate PlatformIO project for an ESP32-WROOM-32D that receives I2S audio from 
 - **DMA tuning**: I2S1 on the S3 side needs 16×480 DMA frames with 10ms write timeout to avoid drops
 - ESP32-S3 does NOT support Bluetooth Classic (BR/EDR) — only BLE 5.0. A2DP requires the original ESP32.
 - WiFi and BT Classic cannot coexist on a single ESP32 — hence the two-board wired I2S approach.
-- `audio_process_i2s` override MUST be in a separate `.cpp` that doesn't include `Audio.h` — weak attribute taints any definition in the same translation unit.
+- `audio_process_i2s` override MUST be in a separate `.cpp` — weak-symbol overrides require separate translation units.
 - Never set `*continueI2S=false` in `audio_process_i2s` — it removes I2S0 blocking write pacing, causing the decoder to run at CPU speed and flood downstream buffers.
 - Bridge includes linear interpolation resampler for non-44100Hz sources (e.g., BBC at 48kHz).
 - Write 960 bytes of silence after `i2s_channel_enable()` to prevent BT speaker crack on reconnect.
@@ -294,27 +311,31 @@ The bt-bridge firmware already prints stats every 3 seconds on serial (`bt-bridg
 
 - Use `char[]` with `strlcpy`/`snprintf` instead of Arduino `String` — avoids heap fragmentation on ESP32.
 - Pre-compute `color565()` values in `setup()` — never call in draw loops.
-- `audio.loop()` must run frequently on its dedicated core. Never put blocking code in the audio task.
-- NVS persistence uses `markDirty()`/`flushIfDirty()` pattern — never save on every event.
-- All audio callback events use `Audio::msg_t` with `msg.e` (event type) and `msg.msg` (string payload).
+- ESP-GMF callbacks (`pcm_output_cb_`, `http_event_cb_`, `player_event_cb_`) run on Core 0 — keep them lightweight.
+- NVS persistence uses `mark_vol_dirty_()`/`flush_vol_if_dirty_()` pattern — never save on every event.
+- Cross-core shared strings use `std::atomic<int>` title index with acquire/release ordering — not `volatile`.
+- Single-word shared state (int, bool, enum) uses `volatile` — safe on ESP32 (32-bit aligned atomics).
 - Mark component classes `final` — enables ESPHome 2026.3+ devirtualization of `loop()`, `setup()`, etc.
 - Use `network::is_connected()` and `network::get_ip_addresses()` — never raw `WiFi.*` APIs.
+- Use ESP-IDF gpio APIs (`gpio_set_level`) — not Arduino `digitalWrite`.
 
 ## Code Review Checklist
 
 When reviewing changes, always verify:
 
 - **Memory leaks**: No Arduino `String` in render loops, no `new`/`malloc` without matching `delete`/`free`, sprites not re-created without `deleteSprite()`.
-- **Thread safety**: Never call `audio.*` methods (except `setVolume()`) from Core 1. Use `pending_connect_`/`pending_pause_`/`pending_stop_` flag pattern. Copy data (URL, title) into buffers BEFORE setting flags. Use double-buffer for shared strings. All cross-core shared state must be `volatile`.
+- **Thread safety**: ESP-GMF callbacks run on Core 0. Cross-core strings use `std::atomic<int>` index with acquire/release. Single-word state uses `volatile`. Copy data into buffers BEFORE flipping atomic index.
 - **NVS flash wear**: Never save to NVS in rapid-fire handlers (touch, buttons, slider). Use `mark_vol_dirty_()`/`flush_vol_if_dirty_()` for deferred writes with 3s debounce.
 - **Blocking calls**: No `delay()` in ESPHome `loop()`. Use deferred state machines with `millis()` timestamps.
 - **Draw loop cost**: No `color565()` calls, `WiFi.localIP()`, `network::get_ip_addresses()`, or heap-allocating functions inside render loops. Pre-compute in `setup()`.
-- **Overflow**: `millis()` arithmetic must use unsigned subtraction. Intermediate touch/volume math must stay within `int` range.
-- **I2S bridge**: `audio_process_i2s` must stay in its own `.cpp` without `Audio.h`. Never disable `continueI2S`. Update `bridge_sample_rate` when stream format changes.
+- **Audio callback cost**: `pcm_output_cb_` and `feed_fft_samples` run on Core 0 — no `millis()`, `ESP_LOGI`, or heap allocations. Use `volatile` counters, not function calls.
+- **Overflow**: `millis()` arithmetic must use unsigned subtraction. Intermediate touch/volume math must stay within `int` range. Volume Q8 math uses `int32_t` with saturation.
+- **I2S bridge**: `audio_process_i2s` must stay in its own `.cpp`. Never disable `continueI2S`. Update `bridge_sample_rate` when stream format changes.
 - **I2C bus**: All GT911 reads must go through ESPHome's I2C bus (`read_register16`), never `lgfx::i2c` or `Wire`.
 - **Touch zones**: Must match drawn button coordinates. GT911 raw coords = screen coords (no offset). Expand zones for buttons near screen edges.
 - **UI consistency**: New buttons must use `draw_wa_btn_()` with the Winamp 2 palette. Update `touch_highlight_` comment when adding new indices.
-- **Build workarounds**: Preserve all `__init__.py` IDF component un-exclusions and Arduino library includes. Test build after any `__init__.py` changes.
+- **Build workarounds**: Preserve all `__init__.py` IDF component un-exclusions and patch script registrations. Test build after any `__init__.py` changes.
+- **ICY metadata**: Changes to `http_event_cb_` or `icy_read_` must preserve the state machine invariants (icy_remaining_ counts down audio bytes, icy_meta_remaining_ counts down metadata bytes, both reset after their respective blocks complete).
 - **Documentation**: Update this file if changes affect features, architecture, pitfalls, or the review checklist.
 
 ## Development Workflow
@@ -322,7 +343,7 @@ When reviewing changes, always verify:
 Before completing any task, follow this checklist:
 
 1. **Re-read**: Review the Code Review Checklist and ESPHome Pitfalls sections above
-2. **Build**: `cd esphome && esphome compile esp32radio.yaml` — compiles without errors
+2. **Build**: `esphome compile esp32radio.yaml` — compiles without errors
 3. **Flash & verify**: `esphome upload esp32radio.yaml --device /dev/ttyACM0` — test on hardware
 4. **Code review**: Review the diff (`git diff`) against the checklist above
 5. **Update docs**: Update this file if the change affects features, architecture, pitfalls, or the checklist
