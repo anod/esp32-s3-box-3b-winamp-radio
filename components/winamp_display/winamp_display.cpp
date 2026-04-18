@@ -64,6 +64,8 @@ void WinampDisplay::setup() {
     ESP_LOGI(TAG, "Restored brightness: %d", this->brightness_);
   }
 
+  this->publish_brightness_();
+
   // Create PSRAM-backed sprites
   this->canvas_.setColorDepth(16);
   this->canvas_.setPsram(true);  // 320×218×2 = 140KB needs PSRAM
