@@ -1,5 +1,5 @@
-# ESP32-S3-BOX-3 Internet Radio — ESPHome PoC
-# Proves audio streaming works under ESPHome framework
+# ESP32-S3-BOX-3 Internet Radio
+# ESP-IDF + ESP-GMF audio pipeline, Winamp 2 display, BT speaker bridge
 
 esphome:
   name: esp32radio
@@ -12,11 +12,9 @@ esphome:
 esp32:
   board: esp32s3box
   flash_size: 16MB
-  cpu_frequency: 240MHz
   framework:
     type: esp-idf
     sdkconfig_options:
-      CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240: "y"
       # ESP-GMF: disable built-in HTTP IO (we register our own with cert bundle)
       CONFIG_ESP_AUDIO_SIMPLE_PLAYER_HTTP_EN: "n"
       # Disable resampler (we handle sample rate via I2S reconfig)
@@ -57,8 +55,7 @@ i2c:
   scl: GPIO18
   scan: false
 
-# ES8311 codec — configured via custom I2C init (audio_dac: es8311 is Arduino-only)
-# Codec registers are written in internet_radio setup() using ESPHome I2C bus
+# ES8311 codec — configured in internet_radio setup() via esp_codec_dev
 
 # --- Custom Components ---
 

@@ -34,9 +34,7 @@ components/
 │       ├── __init__.py          # Schema, codegen, IDF component deps
 │       ├── internet_radio.h     # MediaPlayer subclass
 │       ├── internet_radio.cpp   # ESP-GMF pipeline, ICY metadata, volume
-│       ├── patch_gmf_http.py    # Pre-build: patches GMF for ICY header capture
-│       ├── patch_audio_lib.py   # Pre-build: legacy (inactive with ESP-GMF)
-│       └── stubs/esp_dsp.h      # Stub (legacy, may be removed)
+│       └── patch_gmf_http.py    # Pre-build: patches GMF for ICY header capture
 ├── i2s_bridge/
 │   ├── __init__.py              # Defines i2s_bridge_ns
 │   └── switch/
@@ -157,8 +155,8 @@ These workarounds are in `__init__.py` files and MUST be preserved:
 
 ### Framework & Dependencies
 
-- ESPHome 2026.3.2, ESP-IDF framework (no Arduino)
-- ESP-IDF 5.5.3
+- ESPHome 2026.4.0, ESP-IDF framework (no Arduino)
+- ESP-IDF 5.5.4
 - ESP-GMF `esp_audio_simple_player` 0.9.6 (audio pipeline)
 - `esp_codec_dev` 1.5.2 (ES8311 driver)
 - LovyanGFX 1.2.19 (pinned via `cg.add_library`)
