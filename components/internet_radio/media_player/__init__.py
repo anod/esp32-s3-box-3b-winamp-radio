@@ -50,6 +50,13 @@ async def to_code(config):
     esp32.include_builtin_idf_component("esp_driver_i2s")
     esp32.include_builtin_idf_component("esp_http_client")
 
+    # Pre-build script: patch GMF HTTP IO for ICY metadata header extraction
+    import pathlib
+    patch_script = pathlib.Path(__file__).parent / "patch_gmf_http.py"
+    cg.add_platformio_option(
+        "extra_scripts", [f"pre:{patch_script}"]
+    )
+
     # ESP-GMF audio pipeline (HTTP → decoder → PCM output callback)
     add_idf_component(name="espressif/esp_audio_simple_player", ref="0.9.6~1")
     # ES8311 codec driver (register-level control via I2C)

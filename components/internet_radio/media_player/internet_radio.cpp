@@ -13,6 +13,12 @@
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
 
+// ─── ICY metaint: captured by patched GMF HTTP event handler ───
+// The pre-build script (patch_gmf_http.py) adds icy-metaint header
+// extraction to the GMF HTTP IO internal event handler. It stores
+// the value in this global, which we read on first ON_RESPONSE.
+extern "C" volatile int g_icy_metaint;
+
 // FFT sample feed (defined in spectrum.cpp)
 extern void feed_fft_samples(const uint8_t *data, int size);
 
@@ -363,12 +369,123 @@ void InternetRadio::init_http_io_() {
   ESP_LOGI(TAG, "HTTP IO registered (HTTPS cert bundle enabled)");
 }
 
-// ─── HTTP event callback (Core 0) — placeholder for ICY metadata ─
+// ─── HTTP event callback (Core 0) — ICY metadata extraction ──
 
 int InternetRadio::http_event_cb_(http_stream_event_msg_t *msg) {
-  // ICY metadata injection will be added in Step 2c with a read filter
-  // to strip metadata from the audio stream. Without stripping, ICY
-  // metadata corrupts AAC/MP3 frames.
+  auto *self = static_cast<InternetRadio *>(msg->user_data);
+
+  if (msg->event_id == HTTP_STREAM_PRE_REQUEST) {
+    // Request ICY metadata from Icecast/Shoutcast servers
+    auto client = static_cast<esp_http_client_handle_t>(msg->http_client);
+    esp_http_client_set_header(client, "Icy-MetaData", "1");
+    // Reset ICY state for new connection
+    g_icy_metaint = 0;
+    self->icy_metaint_ = 0;
+    self->icy_remaining_ = 0;
+    self->icy_meta_remaining_ = 0;
+    self->icy_meta_idx_ = 0;
+    self->icy_header_checked_ = false;
+    return 0;
+  }
+
+  if (msg->event_id == HTTP_STREAM_ON_RESPONSE) {
+    auto client = static_cast<esp_http_client_handle_t>(msg->http_client);
+
+    // On first read, check for icy-metaint response header
+    if (!self->icy_header_checked_) {
+      self->icy_header_checked_ = true;
+      int metaint = g_icy_metaint;  // read value captured by patched GMF handler
+      if (metaint > 0) {
+        self->icy_metaint_ = metaint;
+        self->icy_remaining_ = metaint;
+        ESP_LOGI(TAG, "ICY metaint: %d bytes", metaint);
+      } else {
+        ESP_LOGD(TAG, "No ICY metadata in response");
+      }
+    }
+
+    // If no ICY metadata, let the library do its normal read
+    if (self->icy_metaint_ <= 0) return 0;
+
+    // Read raw bytes and strip ICY metadata inline.
+    // We read from esp_http_client ourselves and return clean audio bytes.
+    char *out = static_cast<char *>(msg->buffer);
+    int out_len = msg->buffer_len;
+    int out_pos = 0;
+
+    while (out_pos < out_len) {
+      if (self->icy_meta_remaining_ > 0) {
+        // Currently inside a metadata block — read and discard/collect
+        int to_read = self->icy_meta_remaining_;
+        char tmp[256];
+        if (to_read > (int)sizeof(tmp)) to_read = (int)sizeof(tmp);
+        int rd = esp_http_client_read(client, tmp, to_read);
+        if (rd <= 0) break;
+        // Collect metadata text
+        for (int i = 0; i < rd && self->icy_meta_idx_ < (int)sizeof(self->icy_meta_buf_) - 1; i++) {
+          self->icy_meta_buf_[self->icy_meta_idx_++] = tmp[i];
+        }
+        self->icy_meta_remaining_ -= rd;
+        if (self->icy_meta_remaining_ <= 0) {
+          // Metadata block complete — parse StreamTitle
+          self->icy_meta_buf_[self->icy_meta_idx_] = '\0';
+          if (self->icy_meta_idx_ > 0) {
+            // Parse "StreamTitle='...'; "
+            const char *st = strstr(self->icy_meta_buf_, "StreamTitle='");
+            if (st) {
+              st += 13;  // skip "StreamTitle='"
+              const char *end = strstr(st, "';");
+              if (!end) end = st + strlen(st);
+              int len = end - st;
+              if (len > 0 && len < 127) {
+                char title[128];
+                memcpy(title, st, len);
+                title[len] = '\0';
+                // Write to double-buffer (Core 0 side)
+                int wi = 1 - self->title_read_idx_;
+                if (strcmp(self->title_bufs_[wi], title) != 0) {
+                  strlcpy(self->title_bufs_[wi], title, 128);
+                  self->title_read_idx_ = wi;
+                  ESP_LOGI(TAG, "ICY: %s", title);
+                }
+              }
+            }
+          }
+          self->icy_meta_idx_ = 0;
+          self->icy_remaining_ = self->icy_metaint_;  // reset audio counter for next interval
+        }
+        continue;
+      }
+
+      if (self->icy_remaining_ == 0) {
+        // Read the 1-byte metadata length prefix
+        char len_byte = 0;
+        int rd = esp_http_client_read(client, &len_byte, 1);
+        if (rd <= 0) break;
+        int meta_len = (uint8_t)len_byte * 16;
+        if (meta_len > 0) {
+          self->icy_meta_remaining_ = meta_len;
+          self->icy_meta_idx_ = 0;
+        } else {
+          // No metadata this interval
+          self->icy_remaining_ = self->icy_metaint_;
+        }
+        continue;
+      }
+
+      // Read audio data up to next metadata boundary
+      int audio_avail = self->icy_remaining_;
+      int want = out_len - out_pos;
+      if (audio_avail < want) want = audio_avail;
+      int rd = esp_http_client_read(client, out + out_pos, want);
+      if (rd <= 0) break;
+      out_pos += rd;
+      self->icy_remaining_ -= rd;
+    }
+
+    return out_pos > 0 ? out_pos : -1;
+  }
+
   return 0;
 }
 

@@ -124,6 +124,14 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   // HTTP IO handle (custom, with cert bundle)
   esp_gmf_io_handle_t http_io_{nullptr};
 
+  // ICY metadata state (accessed only on Core 0 HTTP IO thread)
+  int icy_metaint_{0};           // bytes between metadata blocks (0 = no ICY)
+  int icy_remaining_{0};         // audio bytes left before next metadata block
+  int icy_meta_remaining_{0};    // metadata bytes left to skip/collect
+  int icy_meta_idx_{0};          // current write position in icy_meta_buf_
+  bool icy_header_checked_{false}; // true after first response checks headers
+  char icy_meta_buf_[512]{};     // metadata text buffer
+
   // ES8311 codec interface (direct calls, no esp_codec_dev wrapper)
   const audio_codec_if_t *codec_if_{nullptr};
 
