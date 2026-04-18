@@ -66,6 +66,11 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   int get_vol() const { return this->vol_; }
   static constexpr int get_max_volume() { return 21; }
 
+  // Map UI volume (0–21) to Audio library volume (0–100).
+  // The library's cubic dB curve makes steps 1–8 inaudible at 21 steps.
+  // We use 100 steps and skip the bottom of the curve for audible low volumes.
+  static uint8_t map_volume_(int vol);
+
   // Station control (for select entity and display)
   void set_station(int idx);
   static constexpr int get_num_stations() { return NUM_STATIONS; }

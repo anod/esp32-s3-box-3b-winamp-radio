@@ -19,6 +19,21 @@ namespace internet_radio {
 
 static const char *const TAG = "internet_radio";
 
+// Volume mapping: UI step (0–21) → Audio library volume (0–100).
+// Library uses setVolumeSteps(100) with cubic dB curve. We skip the
+// inaudible sub-35 range so step 1 is ~-44 dB instead of ~-60 dB.
+static const uint8_t VOL_LUT[22] = {
+    0,                                            // 0: mute
+    35, 38, 42, 45, 48, 51, 55, 58, 61, 64, 68,  // 1–11: low–mid
+    71, 74, 77, 81, 84, 87, 90, 94, 97, 100       // 12–21: mid–full
+};
+
+uint8_t InternetRadio::map_volume_(int vol) {
+  if (vol <= 0) return 0;
+  if (vol >= 21) return 100;
+  return VOL_LUT[vol];
+}
+
 // Singleton instance for C-style Audio callback
 InternetRadio *InternetRadio::instance_ = nullptr;
 
@@ -104,7 +119,8 @@ void InternetRadio::setup() {
   // Configure Audio library
   Audio::audio_info_callback = audio_callback;
   this->audio_.setPinout(this->bclk_pin_, this->lrclk_pin_, this->dout_pin_, this->mclk_pin_);
-  this->audio_.setVolume(this->vol_);
+  this->audio_.setVolumeSteps(100);
+  this->audio_.setVolume(map_volume_(this->vol_));
   this->audio_.setConnectionTimeout(5000, 0);
 
   // Set initial HA state
@@ -250,7 +266,7 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
     if (this->vol_ < 0) this->vol_ = 0;
     if (this->vol_ > 21) this->vol_ = 21;
     // setVolume is safe to call cross-core
-    this->audio_.setVolume(this->vol_);
+    this->audio_.setVolume(map_volume_(this->vol_));
     this->volume = v;
     this->mark_vol_dirty_();
     ESP_LOGD(TAG, "Volume: %d (%.0f%%)", (int)this->vol_, v * 100);
@@ -331,7 +347,7 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
         int v = this->vol_ + 1;
         if (v > 21) v = 21;
         this->vol_ = v;
-        this->audio_.setVolume(v);
+        this->audio_.setVolume(map_volume_(v));
         this->volume = (float)v / 21.0f;
         this->mark_vol_dirty_();
         break;
@@ -341,7 +357,7 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
         int v = this->vol_ - 1;
         if (v < 0) v = 0;
         this->vol_ = v;
-        this->audio_.setVolume(v);
+        this->audio_.setVolume(map_volume_(v));
         this->volume = (float)v / 21.0f;
         this->mark_vol_dirty_();
         break;
@@ -357,7 +373,7 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
       case media_player::MEDIA_PLAYER_COMMAND_UNMUTE:
         if (this->is_muted_) {
           this->is_muted_ = false;
-          this->audio_.setVolume(this->vol_);
+          this->audio_.setVolume(map_volume_(this->vol_));
         }
         break;
 
@@ -435,7 +451,7 @@ void InternetRadio::set_volume_direct(int vol) {
   if (vol < 0) vol = 0;
   if (vol > 21) vol = 21;
   this->vol_ = vol;
-  this->audio_.setVolume(vol);
+  this->audio_.setVolume(map_volume_(vol));
   this->volume = (float)vol / 21.0f;
   this->is_muted_ = (vol == 0);
   this->mark_vol_dirty_();
