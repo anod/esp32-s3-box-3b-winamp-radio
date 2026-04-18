@@ -73,10 +73,9 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   int get_vol() const { return this->vol_; }
   static constexpr int get_max_volume() { return 21; }
 
-  // Map UI volume (0–21) to Audio library volume (0–100).
-  // The library's cubic dB curve makes steps 1–8 inaudible at 21 steps.
-  // We use 100 steps and skip the bottom of the curve for audible low volumes.
-  static uint8_t map_volume_(int vol);
+  // Map UI volume step (0–21) → Q8 fixed-point gain (0–512).
+  // Perceptual dB curve: -42 dB (step 1) to +6 dB (step 21).
+  static int map_vol_q8_(int step);
 
   // Station control (for select entity and display)
   void set_station(int idx);
@@ -127,6 +126,10 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
 
   // ES8311 codec interface (direct calls, no esp_codec_dev wrapper)
   const audio_codec_if_t *codec_if_{nullptr};
+
+  // Software volume: fixed-point Q8 gain applied to PCM samples before I2S output.
+  // 256 = unity (100%), 0 = silent. Updated by set_volume_direct/control.
+  volatile int sw_vol_gain_{256};
 
   // I2S0 TX channel (to ES8311 codec)
   i2s_chan_handle_t i2s_tx_{nullptr};

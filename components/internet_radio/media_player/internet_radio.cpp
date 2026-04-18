@@ -25,20 +25,25 @@ namespace internet_radio {
 
 static const char *const TAG = "internet_radio";
 
-// Volume mapping: UI step (0–21) → Audio library volume (0–100).
-// Library uses setVolumeSteps(100) with cubic dB curve. We skip the
-// inaudible sub-35 range so step 1 is ~-44 dB instead of ~-60 dB.
-static const uint8_t VOL_LUT[22] = {
-    0,                                            // 0: mute
-    35, 38, 42, 45, 48, 51, 55, 58, 61, 64, 68,  // 1–11: low–mid
-    71, 74, 77, 81, 84, 87, 90, 94, 97, 100       // 12–21: mid–full
+// Software volume: UI step (0–21) → Q8 fixed-point gain.
+// Perceptual dB curve: -42 dB to +6 dB in 21 steps (2.29 dB/step).
+// gain = 10^(dB/20) * 256, where dB = -42 + step * (48/21).
+// Step 18 ≈ unity (0 dB), steps 19-21 provide +2/+4/+6 dB boost.
+// Clipping is handled in pcm_output_cb_ (int32_t→int16_t saturation).
+static const uint16_t VOL_Q8[22] = {
+    0,                                          // 0: mute
+    3,   3,   5,   6,   8,  10,  13,  17,      // 1–8:  ~-40 to -24 dB
+    22,  28,  37,  48,  62,  81, 106, 138,      // 9–16: ~-21 to -5 dB
+    179, 231, 301, 392, 512                     // 17–21: ~-3 to +6 dB
 };
 
-uint8_t InternetRadio::map_volume_(int vol) {
-  if (vol <= 0) return 0;
-  if (vol >= 21) return 100;
-  return VOL_LUT[vol];
+int InternetRadio::map_vol_q8_(int step) {
+  if (step <= 0) return 0;
+  if (step >= 21) return 512;
+  return VOL_Q8[step];
 }
+
+// ES8311 hardware DAC: +6 dB boost for internal speaker analog stage.
 
 // Singleton instance for C-style Audio callback
 InternetRadio *InternetRadio::instance_ = nullptr;
@@ -122,9 +127,11 @@ void InternetRadio::setup() {
     gpio_set_level(gpio, 0);
   }
 
-  // Initialize audio hardware and pipeline
+  // Set software volume from NVS BEFORE hardware init (codec may fail on cold boot)
+  this->sw_vol_gain_ = map_vol_q8_(this->vol_);
+
+  // Initialize I2S and player — ES8311 codec deferred to loop() (I2C/MCLK not ready)
   this->init_i2s0_();
-  this->init_es8311_();
   this->init_player_();
 
   // Set initial HA state
@@ -135,6 +142,16 @@ void InternetRadio::setup() {
 // ─── Loop (Core 1 — ESPHome main loop) ───────────────────
 
 void InternetRadio::loop() {
+  // Deferred ES8311 init — retry every 2 seconds until success
+  if (!this->codec_if_) {
+    static uint32_t last_codec_try = 0;
+    uint32_t now = millis();
+    if (now - last_codec_try >= 2000) {
+      last_codec_try = now;
+      this->init_es8311_();
+    }
+  }
+
   bool wifi_now = network::is_connected();
 
   // Detect WiFi connect
@@ -244,18 +261,19 @@ void InternetRadio::init_i2s0_() {
 }
 
 void InternetRadio::init_es8311_() {
-  // Get ESPHome's I2C bus handle (IDF 5.4+ private API)
+  // Get ESPHome's I2C bus handle
   i2c_master_bus_handle_t i2c_bus = nullptr;
   esp_err_t err = i2c_master_get_bus_handle(0, &i2c_bus);
   if (err != ESP_OK || !i2c_bus) {
-    ESP_LOGE(TAG, "Failed to get I2C bus handle: %s", esp_err_to_name(err));
+    ESP_LOGW(TAG, "I2C bus 0 handle: err=%s handle=%p", esp_err_to_name(err), i2c_bus);
     return;
   }
 
   // I2C control interface for ES8311
+  // NOTE: esp_codec_dev uses 8-bit I2C address (7-bit << 1). ES8311 = 0x18 << 1 = 0x30
   audio_codec_i2c_cfg_t i2c_cfg = {
       .port = 0,
-      .addr = 0x18,  // ES8311 on ESP-BOX-3
+      .addr = 0x30,
       .bus_handle = i2c_bus,
   };
   const audio_codec_ctrl_if_t *ctrl = audio_codec_new_i2c_ctrl(&i2c_cfg);
@@ -277,14 +295,15 @@ void InternetRadio::init_es8311_() {
   es_cfg.invert_mclk = false;
   es_cfg.invert_sclk = false;
 
+  // Single attempt — caller (loop) handles retry cadence
   this->codec_if_ = es8311_codec_new(&es_cfg);
   if (!this->codec_if_) {
-    ESP_LOGE(TAG, "Failed to create ES8311 codec");
+    ESP_LOGW(TAG, "ES8311 codec not ready, will retry...");
     return;
   }
 
-  // Open and configure for DAC output
-  this->codec_if_->open(this->codec_if_, nullptr, 0);
+  // es8311_codec_new() already calls open() internally.
+  // Enable DAC output and configure sample format.
   this->codec_if_->enable(this->codec_if_, true);
 
   esp_codec_dev_sample_info_t fs = {};
@@ -294,11 +313,12 @@ void InternetRadio::init_es8311_() {
   fs.mclk_multiple = 256;
   this->codec_if_->set_fs(this->codec_if_, &fs);
 
-  // Set initial volume
-  float vol_pct = (float)map_volume_(this->vol_);
-  this->codec_if_->set_vol(this->codec_if_, vol_pct);
+  // ES8311 DAC at +6 dB — analog boost for internal speaker
+  this->codec_if_->set_vol(this->codec_if_, 6.0f);
+  this->sw_vol_gain_ = map_vol_q8_(this->vol_);
+  ESP_LOGI(TAG, "ES8311: vol_step=%d q8=%d", (int)this->vol_, (int)this->sw_vol_gain_);
 
-  ESP_LOGI(TAG, "ES8311 initialized (44100Hz stereo 16-bit, vol=%d)", (int)this->vol_);
+  ESP_LOGI(TAG, "ES8311 initialized (44100Hz stereo 16-bit)");
 }
 
 void InternetRadio::init_player_() {
@@ -355,24 +375,37 @@ int InternetRadio::pcm_output_cb_(uint8_t *data, int size, void *ctx) {
   auto *self = static_cast<InternetRadio *>(ctx);
   size_t written = 0;
 
-  // 1. Write to ES8311 speaker (bounded timeout to avoid hanging stop/reconnect)
+  // 1. Feed FFT BEFORE volume scaling — visualizer needs full-amplitude PCM
+  feed_fft_samples(data, size);
+
+  // 2. Software volume: scale 16-bit PCM samples using Q8 fixed-point gain
+  int gain = self->sw_vol_gain_;
+  if (gain != 256) {
+    int16_t *samples = reinterpret_cast<int16_t *>(data);
+    int num_samples = size / 2;
+    for (int i = 0; i < num_samples; i++) {
+      int32_t s = (int32_t)samples[i] * gain >> 8;
+      if (s > 32767) s = 32767;
+      if (s < -32768) s = -32768;
+      samples[i] = (int16_t)s;
+    }
+  }
+
+  // 3. Write to ES8311 speaker (bounded timeout to avoid hanging stop/reconnect)
   esp_err_t err = i2s_channel_write(self->i2s_tx_, data, size, &written,
                                     pdMS_TO_TICKS(100));
   if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
     return -1;
   }
 
-  // 2. Write to I2S bridge (BT speaker) if active
+  // 4. Write to I2S bridge (BT speaker) if active
   if (i2s_bridge::I2SBridge::is_active()) {
     size_t bw = 0;
     i2s_channel_write(i2s_bridge::I2SBridge::get_tx_handle(),
                       data, size, &bw, pdMS_TO_TICKS(10));
   }
 
-  // 3. Feed FFT sample accumulator
-  feed_fft_samples(data, size);
-
-  // 4. Watchdog frame count
+  // 5. Watchdog frame count
   g_audio_frame_count++;
 
   return (int)written;
@@ -492,14 +525,11 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
     this->vol_ = (int)(v * 21.0f + 0.5f);
     if (this->vol_ < 0) this->vol_ = 0;
     if (this->vol_ > 21) this->vol_ = 21;
-    if (this->codec_if_) {
-      float vol_pct = (float)map_volume_(this->vol_);
-      this->codec_if_->set_vol(this->codec_if_, vol_pct);
-    }
+    this->sw_vol_gain_ = map_vol_q8_(this->vol_);
     this->volume = v;
     this->is_muted_ = (this->vol_ == 0);
     this->mark_vol_dirty_();
-    ESP_LOGD(TAG, "Volume: %d (%.0f%%)", (int)this->vol_, v * 100);
+    ESP_LOGD(TAG, "Volume SET: step=%d q8=%d from=%.3f", (int)this->vol_, (int)this->sw_vol_gain_, v);
   }
 
   if (call.get_media_url().has_value()) {
@@ -597,8 +627,7 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
         int v = this->vol_ + 1;
         if (v > 21) v = 21;
         this->vol_ = v;
-        if (this->codec_if_)
-          this->codec_if_->set_vol(this->codec_if_, (float)map_volume_(v));
+        this->sw_vol_gain_ = map_vol_q8_(v);
         this->volume = (float)v / 21.0f;
         this->mark_vol_dirty_();
         break;
@@ -608,8 +637,7 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
         int v = this->vol_ - 1;
         if (v < 0) v = 0;
         this->vol_ = v;
-        if (this->codec_if_)
-          this->codec_if_->set_vol(this->codec_if_, (float)map_volume_(v));
+        this->sw_vol_gain_ = map_vol_q8_(v);
         this->volume = (float)v / 21.0f;
         this->mark_vol_dirty_();
         break;
@@ -618,6 +646,7 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
       case media_player::MEDIA_PLAYER_COMMAND_MUTE:
         if (!this->is_muted_) {
           this->is_muted_ = true;
+          this->sw_vol_gain_ = 0;
           if (this->codec_if_)
             this->codec_if_->mute(this->codec_if_, true);
         }
@@ -626,6 +655,7 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
       case media_player::MEDIA_PLAYER_COMMAND_UNMUTE:
         if (this->is_muted_) {
           this->is_muted_ = false;
+          this->sw_vol_gain_ = map_vol_q8_(this->vol_);
           if (this->codec_if_)
             this->codec_if_->mute(this->codec_if_, false);
         }
@@ -732,8 +762,8 @@ void InternetRadio::set_volume_direct(int vol) {
   if (vol < 0) vol = 0;
   if (vol > 21) vol = 21;
   this->vol_ = vol;
-  if (this->codec_if_)
-    this->codec_if_->set_vol(this->codec_if_, (float)map_volume_(vol));
+  this->sw_vol_gain_ = map_vol_q8_(vol);
+  ESP_LOGD(TAG, "Volume: step=%d q8=%d", vol, (int)this->sw_vol_gain_);
   this->volume = (float)vol / 21.0f;
   this->is_muted_ = (vol == 0);
   this->mark_vol_dirty_();
@@ -785,6 +815,7 @@ void InternetRadio::flush_vol_if_dirty_() {
     this->vol_dirty_ = false;
     int save_vol = this->vol_;
     this->volume_pref_.save(&save_vol);
+    global_preferences->sync();  // flush to NVS immediately
     ESP_LOGD(TAG, "NVS: saved volume=%d", save_vol);
   }
 }

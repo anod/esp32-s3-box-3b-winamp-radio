@@ -384,11 +384,15 @@ void WinampDisplay::draw_frame_() {
     spectrum_compute();
 
     // Smooth spectrum bars: fast attack (0.6), slow decay (0.15)
-    // spec_bands contains magnitude² — log10 scaling adjusted accordingly
+    // spec_bands contains magnitude² from normalized [-1,1] samples
+    // Per-band frequency compensation: boost higher bands to counter 1/f rolloff
+    static constexpr float band_gain[VIZ_BANDS] = {
+      1.0f, 1.2f, 1.4f, 1.7f, 2.0f, 2.4f, 2.8f, 3.3f,
+      3.8f, 4.4f, 5.0f, 5.7f, 6.5f, 7.4f, 8.4f, 9.5f
+    };
     for (int i = 0; i < VIZ_BANDS; i++) {
-      float target = spec_bands[i];
-      // magnitude² threshold: 10000 (= 100²), scale by 0.65 (half of 1.3 for sqrt)
-      target = (target > 10000.0f) ? (log10f(target) - 4.0f) * 0.65f : 0.0f;
+      float target = spec_bands[i] * band_gain[i];
+      target = (target > 0.5f) ? (log10f(target) + 0.3f) * 2.2f : 0.0f;
       if (target > 5.0f) target = 5.0f;
       if (target < 0.0f) target = 0.0f;
       if (target > this->display_bars_[i])
