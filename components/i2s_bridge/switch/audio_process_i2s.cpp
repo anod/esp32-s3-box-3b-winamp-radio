@@ -4,7 +4,7 @@
 // any definition in the same translation unit.
 // ============================================================
 
-#include <Arduino.h>
+#include <freertos/FreeRTOS.h>
 #include "driver/i2s_std.h"
 #include "i2s_bridge.h"
 

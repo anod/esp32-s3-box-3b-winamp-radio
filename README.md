@@ -145,6 +145,7 @@ The radio appears as a native ESPHome media player in Home Assistant — no MQTT
 - **Core 1**: ESPHome main loop — UI rendering at ~15fps, touch/button input, FFT computation, WiFi, HA API
 - **Display**: PSRAM-backed LovyanGFX sprite (320×218), composed and pushed once per frame
 - **Audio**: ES8311 I2C codec (via ESPHome `audio_dac`), ESP32-audioI2S library for HTTP streaming
+- **Platform APIs**: Custom components prefer ESP-IDF/FreeRTOS APIs (GPIO, reboot delay/restart) to minimize direct Arduino API usage outside the streaming library
 - **FFT**: 128-point radix-2 FFT — Core 0 captures samples (double-buffered), Core 1 computes spectrum
 - **I2S Bridge**: `audio_process_i2s()` hook sends decoded PCM to I2S1 TX when BT mode is active
 - **HA Integration**: ESPHome native API with publish-on-change (zero polling)

@@ -6,6 +6,8 @@
 #include "esphome/core/log.h"
 #include "esphome/components/network/util.h"
 #include "../../i2s_bridge/switch/i2s_bridge.h"
+#include "driver/gpio.h"
+#include "esp_system.h"
 
 // Audio frame counter — incremented by audio_process_i2s on Core 0 (near-zero cost).
 // Read by loop() on Core 1 for underrun detection.
@@ -93,8 +95,10 @@ void InternetRadio::setup() {
 
   // PA pin — keep LOW until stream connects
   if (this->pa_pin_ >= 0) {
-    pinMode(this->pa_pin_, OUTPUT);
-    digitalWrite(this->pa_pin_, LOW);
+    auto gpio = static_cast<gpio_num_t>(this->pa_pin_);
+    gpio_reset_pin(gpio);
+    gpio_set_direction(gpio, GPIO_MODE_OUTPUT);
+    gpio_set_level(gpio, 0);
   }
 
   // Configure Audio library
@@ -178,7 +182,7 @@ void InternetRadio::loop() {
   // Non-blocking PA enable (replaces 200ms blocking delay)
   if (this->pa_pending_ && (millis() - this->pa_pending_ms_ >= 200)) {
     this->pa_pending_ = false;
-    digitalWrite(this->pa_pin_, HIGH);
+    gpio_set_level(static_cast<gpio_num_t>(this->pa_pin_), 1);
   }
 
   // Debounced NVS volume save
@@ -293,7 +297,7 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
           this->pending_stop_ = true;
           this->play_state_ = PS_STOPPED;
           if (this->pa_pin_ >= 0 && !i2s_bridge::I2SBridge::is_active())
-            digitalWrite(this->pa_pin_, LOW);
+            gpio_set_level(static_cast<gpio_num_t>(this->pa_pin_), 0);
         }
         break;
 
@@ -319,7 +323,7 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
           this->pending_stop_ = true;
           this->play_state_ = PS_STOPPED;
           if (this->pa_pin_ >= 0 && !i2s_bridge::I2SBridge::is_active())
-            digitalWrite(this->pa_pin_, LOW);
+            gpio_set_level(static_cast<gpio_num_t>(this->pa_pin_), 0);
         }
         break;
 
@@ -449,8 +453,8 @@ void InternetRadio::toggle_station_list() {
   global_preferences->sync();
   ESP_LOGI(TAG, "Switching to %s list, rebooting...",
            this->station_list_ ? "TEST" : "NORMAL");
-  delay(100);
-  ESP.restart();
+  vTaskDelay(pdMS_TO_TICKS(100));
+  esp_restart();
 }
 
 void InternetRadio::update_ha_state_() {
