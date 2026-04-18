@@ -1,8 +1,7 @@
 // ============================================================
-// internet_radio — ESPHome MediaPlayer wrapping ESP32-audioI2S
-// Runs audio.loop() on Core 0 FreeRTOS task for glitch-free
-// HTTP MP3 streaming. Exposes play/pause/stop/volume/next/prev
-// to Home Assistant via ESPHome native API.
+// internet_radio — ESPHome MediaPlayer wrapping ESP-GMF pipeline
+// HTTP streaming → decoder → PCM output callback (Core 0)
+// ES8311 codec via esp_codec_dev, I2S0 for speaker output
 // ============================================================
 
 #pragma once
@@ -15,6 +14,16 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include "driver/i2s_std.h"
+
+// ESP-GMF audio player
+#include "esp_audio_simple_player.h"
+#include "esp_audio_simple_player_advance.h"
+#include "esp_gmf_io_http.h"
+
+// ES8311 codec
+#include "esp_codec_dev_defaults.h"
+#include "es8311_codec.h"
 
 // Audio frame counter: incremented by audio_process_i2s on Core 0,
 // read by InternetRadio::loop() on Core 1 for underrun detection.
@@ -87,9 +96,6 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
  protected:
   void control(const media_player::MediaPlayerCall &call) override;
 
-  // FreeRTOS audio task (static, pinned to Core 0) — placeholder for ESP-ADF
-  // static void audio_task(void *param);
-
   // Singleton for callbacks
   static InternetRadio *instance_;
 
@@ -100,8 +106,31 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   void update_id3_song_title_();
   void publish_station_select_();
 
-  // Audio engine — will be ESP-ADF pipeline in Step 2
-  // (no audio backend in Step 1)
+  // Audio engine — ESP-GMF pipeline
+  void init_i2s0_();
+  void init_es8311_();
+  void init_player_();
+  void init_http_io_();
+  void reconfig_sample_rate_(uint32_t new_rate);
+
+  // ESP-GMF callbacks (static, Core 0)
+  static int pcm_output_cb_(uint8_t *data, int size, void *ctx);
+  static int player_event_cb_(esp_asp_event_pkt_t *pkt, void *ctx);
+  static int http_event_cb_(http_stream_event_msg_t *msg);
+
+  // ESP-GMF player handle
+  esp_asp_handle_t player_{nullptr};
+  volatile bool player_running_{false};
+
+  // HTTP IO handle (custom, with cert bundle)
+  esp_gmf_io_handle_t http_io_{nullptr};
+
+  // ES8311 codec interface (direct calls, no esp_codec_dev wrapper)
+  const audio_codec_if_t *codec_if_{nullptr};
+
+  // I2S0 TX channel (to ES8311 codec)
+  i2s_chan_handle_t i2s_tx_{nullptr};
+  uint32_t current_sample_rate_{44100};
 
   // Pin configuration
   int bclk_pin_{17};

@@ -1,7 +1,8 @@
 // ============================================================
-// audio_process_i2s — STUB for ESP-IDF migration
-// The weak override pattern is removed (no ESP32-audioI2S library).
-// Will be replaced by a PCM tap audio element in ESP-ADF (Step 3).
+// audio_process_i2s — LEGACY STUB
+// Frame counting and I2S bridge writes are now handled in the
+// ESP-GMF pcm_output_cb_ (internet_radio.cpp).
+// This file kept for g_audio_frame_count extern declaration.
 // ============================================================
 
 #include <cstdint>

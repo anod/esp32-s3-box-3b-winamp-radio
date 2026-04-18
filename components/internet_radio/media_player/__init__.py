@@ -6,6 +6,7 @@ from esphome.components import media_player, esp32, text_sensor, select
 from esphome.const import CONF_ID
 from esphome.core import CORE
 from esphome.components.internet_radio import internet_radio_ns
+from esphome.components.esp32 import add_idf_component
 
 DEPENDENCIES = ["network"]
 
@@ -45,8 +46,14 @@ async def to_code(config):
     await cg.register_component(var, config)
     await media_player.register_media_player(var, config)
 
-    # ESP-IDF: un-exclude esp_driver_i2s (still needed for I2S bridge)
+    # ESP-IDF: un-exclude built-in IDF components
     esp32.include_builtin_idf_component("esp_driver_i2s")
+    esp32.include_builtin_idf_component("esp_http_client")
+
+    # ESP-GMF audio pipeline (HTTP → decoder → PCM output callback)
+    add_idf_component(name="espressif/esp_audio_simple_player", ref="0.9.6~1")
+    # ES8311 codec driver (register-level control via I2C)
+    add_idf_component(name="espressif/esp_codec_dev", ref="1.5.2")
 
     cg.add(var.set_i2s_bclk_pin(config[CONF_I2S_BCLK_PIN]))
     cg.add(var.set_i2s_lrclk_pin(config[CONF_I2S_LRCLK_PIN]))

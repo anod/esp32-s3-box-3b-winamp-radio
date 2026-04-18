@@ -17,6 +17,16 @@ esp32:
     type: esp-idf
     sdkconfig_options:
       CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240: "y"
+      # ESP-GMF: disable built-in HTTP IO (we register our own with cert bundle)
+      CONFIG_ESP_AUDIO_SIMPLE_PLAYER_HTTP_EN: "n"
+      # Disable resampler (we handle sample rate via I2S reconfig)
+      CONFIG_ESP_AUDIO_SIMPLE_PLAYER_RESAMPLE_EN: "n"
+      # Disable file/flash IO (not needed)
+      CONFIG_ESP_AUDIO_SIMPLE_PLAYER_FILE_EN: "n"
+      CONFIG_ESP_AUDIO_SIMPLE_PLAYER_EMBED_FLASH_EN: "n"
+      # Enable TLS cert bundle for HTTPS streams
+      CONFIG_MBEDTLS_CERTIFICATE_BUNDLE: "y"
+      CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL: "y"
 
 psram:
   mode: octal

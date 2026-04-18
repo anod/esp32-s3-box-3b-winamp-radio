@@ -114,9 +114,28 @@ bool spectrum_compute() {
   return true;
 }
 
-// Strong override of the library's weak callback — STUB for ESP-IDF migration.
-// The weak override pattern is removed (no ESP32-audioI2S library).
-// Will be fed from PCM tap audio element in ESP-ADF (Step 3).
-// Keeping the function signature for reference.
-//
-// void audio_process_raw_samples(int32_t *outBuff, int16_t validSamples) { ... }
+// Strong override of the library's weak callback — removed for ESP-IDF migration.
+// PCM data is now fed from the ESP-GMF pcm_output_cb_ via feed_fft_samples().
+
+// Called from PCM output callback (Core 0) — lightweight sample capture.
+// Mixes stereo 16-bit PCM to mono, fills double-buffered accumulator.
+void feed_fft_samples(const uint8_t *data, int size) {
+  if (!spectrum_ready) return;
+
+  const int16_t *samples = reinterpret_cast<const int16_t *>(data);
+  int num_frames = size / 4;  // 16-bit stereo = 4 bytes per frame
+
+  int wb = write_buf_;
+  for (int i = 0; i < num_frames; i++) {
+    // Mix stereo to mono (average left + right), normalize to [-1, 1]
+    float mono = (float)(samples[i * 2] + samples[i * 2 + 1]) * (0.5f / 32768.0f);
+    sample_bufs[wb][accum_idx] = mono;
+    accum_idx++;
+    if (accum_idx >= FFT_N) {
+      accum_idx = 0;
+      sample_ready = true;
+      write_buf_ = 1 - wb;
+      wb = write_buf_;
+    }
+  }
+}
