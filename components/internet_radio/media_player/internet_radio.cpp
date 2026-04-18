@@ -192,9 +192,12 @@ void InternetRadio::loop() {
   }
 
   // Non-blocking PA enable (replaces 200ms blocking delay)
+  // Skip if BT bridge is active — bridge mutes internal speaker
   if (this->pa_pending_ && (millis() - this->pa_pending_ms_ >= 200)) {
     this->pa_pending_ = false;
-    gpio_set_level(static_cast<gpio_num_t>(this->pa_pin_), 1);
+    if (!i2s_bridge::I2SBridge::is_active()) {
+      gpio_set_level(static_cast<gpio_num_t>(this->pa_pin_), 1);
+    }
   }
 
   // Debounced NVS volume save
@@ -408,8 +411,9 @@ int InternetRadio::player_event_cb_(esp_asp_event_pkt_t *pkt, void *ctx) {
       case ESP_ASP_STATE_RUNNING:
         self->play_state_ = PS_PLAYING;
         self->player_running_ = true;
-        // Enable PA (deferred)
-        if (self->pa_pin_ >= 0 && !self->pa_pending_) {
+        // Enable PA (deferred) — only if BT bridge isn't active
+        if (self->pa_pin_ >= 0 && !self->pa_pending_ &&
+            !i2s_bridge::I2SBridge::is_active()) {
           self->pa_pending_ = true;
           self->pa_pending_ms_ = millis();
         }
@@ -689,8 +693,9 @@ void InternetRadio::connect_station_() {
   this->stream_failed_ = false;
   this->watchdog_stall_count_ = 0;
 
-  // Enable PA (deferred 200ms)
-  if (this->pa_pin_ >= 0 && !this->pa_pending_) {
+  // Enable PA (deferred 200ms) — only if BT bridge isn't active
+  if (this->pa_pin_ >= 0 && !this->pa_pending_ &&
+      !i2s_bridge::I2SBridge::is_active()) {
     this->pa_pending_ = true;
     this->pa_pending_ms_ = millis();
   }
