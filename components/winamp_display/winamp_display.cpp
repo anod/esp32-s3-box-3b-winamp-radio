@@ -387,12 +387,13 @@ void WinampDisplay::draw_frame_() {
     // spec_bands contains magnitude² from normalized [-1,1] samples
     // Per-band frequency compensation: boost higher bands to counter 1/f rolloff
     static constexpr float band_gain[VIZ_BANDS] = {
-      1.0f, 1.2f, 1.4f, 1.7f, 2.0f, 2.4f, 2.8f, 3.3f,
-      3.8f, 4.4f, 5.0f, 5.7f, 6.5f, 7.4f, 8.4f, 9.5f
+      1.0f, 1.2f, 1.5f, 1.8f, 2.2f, 2.7f, 3.3f, 4.0f,
+      5.0f, 6.2f, 7.5f, 9.0f, 11.0f, 14.0f, 17.0f, 21.0f
     };
     for (int i = 0; i < VIZ_BANDS; i++) {
       float target = spec_bands[i] * band_gain[i];
-      target = (target > 0.5f) ? (log10f(target) + 0.3f) * 2.2f : 0.0f;
+      // Log scaling: threshold 0.02 (was 0.5), wider range for taller bars
+      target = (target > 0.02f) ? (log10f(target) + 1.7f) * 1.5f : 0.0f;
       if (target > 5.0f) target = 5.0f;
       if (target < 0.0f) target = 0.0f;
       if (target > this->display_bars_[i])
