@@ -57,7 +57,7 @@ This repository includes `.github/workflows/copilot-setup-steps.yml` to prepare 
 - `esphome compile esp32radio.yaml`
 - `pio run -e bt-bridge --project-dir bt-bridge`
 
-To avoid TLS download failures in corporate/proxied networks, set these optional values in the repository **copilot** environment (Settings → Environments → `copilot`):
+To avoid TLS download failures in corporate/proxied networks, set these optional values as repository- or organization-level Actions secrets/variables (not in an environment unless the workflow is updated to use one):
 
 - `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` (secret or variable)
 - `COPILOT_CA_CERT_PEM` (secret or variable containing your PEM CA chain)
