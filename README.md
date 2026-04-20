@@ -50,6 +50,23 @@ esphome upload esp32radio.yaml                           # flash via OTA (after 
 esphome logs esp32radio.yaml --device /dev/ttyACM0       # serial logs
 ```
 
+## Testing with Copilot remote agent
+
+This repository includes `.github/workflows/copilot-setup-steps.yml` to prepare Copilot cloud agent with build tools and run smoke builds:
+
+- `esphome compile esp32radio.yaml`
+- `pio run -e bt-bridge --project-dir bt-bridge`
+
+To avoid TLS download failures in corporate/proxied networks, set these optional values in the repository **copilot** environment (Settings → Environments → `copilot`):
+
+- `HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY` (secret or variable)
+- `COPILOT_CA_CERT_PEM` (secret or variable containing your PEM CA chain)
+
+The setup workflow writes `COPILOT_CA_CERT_PEM` to a temp file and exports:
+`SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS`, and `ssl_cert_file`.
+
+After merging this workflow to the default branch, you can validate it from **Actions** by running **Copilot Setup Steps** manually.
+
 ### WSL USB passthrough
 
 WSL can't see USB devices natively. Install [usbipd-win](https://github.com/dorssel/usbipd-win) on **Windows** (`winget install usbipd`), then:

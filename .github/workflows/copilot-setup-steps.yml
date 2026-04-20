@@ -1,0 +1,91 @@
+name: Copilot Setup Steps
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+  pull_request:
+    paths:
+      - .github/workflows/copilot-setup-steps.yml
+
+jobs:
+  copilot-setup-steps:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Configure optional proxy and custom CA
+        env:
+          HTTPS_PROXY_SECRET: ${{ secrets.HTTPS_PROXY }}
+          HTTPS_PROXY_VAR: ${{ vars.HTTPS_PROXY }}
+          HTTP_PROXY_SECRET: ${{ secrets.HTTP_PROXY }}
+          HTTP_PROXY_VAR: ${{ vars.HTTP_PROXY }}
+          NO_PROXY_SECRET: ${{ secrets.NO_PROXY }}
+          NO_PROXY_VAR: ${{ vars.NO_PROXY }}
+          COPILOT_CA_CERT_PEM_SECRET: ${{ secrets.COPILOT_CA_CERT_PEM }}
+          COPILOT_CA_CERT_PEM_VAR: ${{ vars.COPILOT_CA_CERT_PEM }}
+        run: |
+          set -euo pipefail
+          HTTPS_PROXY_VALUE="${HTTPS_PROXY_SECRET:-${HTTPS_PROXY_VAR:-}}"
+          HTTP_PROXY_VALUE="${HTTP_PROXY_SECRET:-${HTTP_PROXY_VAR:-}}"
+          NO_PROXY_VALUE="${NO_PROXY_SECRET:-${NO_PROXY_VAR:-}}"
+          CA_PEM_VALUE="${COPILOT_CA_CERT_PEM_SECRET:-${COPILOT_CA_CERT_PEM_VAR:-}}"
+
+          if [ -n "${HTTPS_PROXY_VALUE}" ]; then
+            echo "https_proxy=${HTTPS_PROXY_VALUE}" >> "${GITHUB_ENV}"
+            echo "HTTPS_PROXY=${HTTPS_PROXY_VALUE}" >> "${GITHUB_ENV}"
+          fi
+          if [ -n "${HTTP_PROXY_VALUE}" ]; then
+            echo "http_proxy=${HTTP_PROXY_VALUE}" >> "${GITHUB_ENV}"
+            echo "HTTP_PROXY=${HTTP_PROXY_VALUE}" >> "${GITHUB_ENV}"
+          fi
+          if [ -n "${NO_PROXY_VALUE}" ]; then
+            echo "no_proxy=${NO_PROXY_VALUE}" >> "${GITHUB_ENV}"
+            echo "NO_PROXY=${NO_PROXY_VALUE}" >> "${GITHUB_ENV}"
+          fi
+
+          if [ -n "${CA_PEM_VALUE}" ]; then
+            CA_FILE="${RUNNER_TEMP}/copilot-ca.pem"
+            printf "%s\n" "${CA_PEM_VALUE}" > "${CA_FILE}"
+            echo "SSL_CERT_FILE=${CA_FILE}" >> "${GITHUB_ENV}"
+            echo "REQUESTS_CA_BUNDLE=${CA_FILE}" >> "${GITHUB_ENV}"
+            echo "CURL_CA_BUNDLE=${CA_FILE}" >> "${GITHUB_ENV}"
+            echo "NODE_EXTRA_CA_CERTS=${CA_FILE}" >> "${GITHUB_ENV}"
+            echo "ssl_cert_file=${CA_FILE}" >> "${GITHUB_ENV}"
+          fi
+
+      - name: Install ESPHome and PlatformIO
+        run: python3 -m pip install --user esphome platformio
+
+      - name: Add user-local bin to PATH
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Create temporary secrets.yaml for compile
+        run: |
+          set -euo pipefail
+          KEY="$(python3 - <<'PY'
+          import os, base64
+          print(base64.b64encode(os.urandom(32)).decode())
+          PY
+          )"
+          cat > secrets.yaml <<EOF
+          wifi_ssid: "TESTSSID"
+          wifi_password: "TESTPASS123"
+          esp32radio_api_key: "${KEY}"
+          esp32radio_ota_password: "TESTPASS123"
+          EOF
+
+      - name: Smoke build ESPHome firmware
+        run: esphome compile esp32radio.yaml
+
+      - name: Smoke build BT bridge firmware
+        run: pio run -e bt-bridge --project-dir bt-bridge
