@@ -12,6 +12,7 @@
 #include "driver/i2c_master.h"
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
+#include <cstring>
 
 // ─── ICY metaint: captured by patched GMF HTTP event handler ───
 // The pre-build script (patch_gmf_http.py) adds icy-metaint header
@@ -500,7 +501,9 @@ int InternetRadio::pcm_output_cb_(uint8_t *data, int size, void *ctx) {
 
   // 2. Software volume: scale 16-bit PCM samples using Q8 fixed-point gain
   int gain = self->sw_vol_gain_;
-  if (gain != 256) {
+  if (gain == 0) {
+    memset(data, 0, size);
+  } else if (gain != 256) {
     int16_t *samples = reinterpret_cast<int16_t *>(data);
     int num_samples = size / 2;
     for (int i = 0; i < num_samples; i++) {

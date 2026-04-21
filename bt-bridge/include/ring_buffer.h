@@ -32,10 +32,16 @@ public:
         size_t tail = m_tail.load(std::memory_order_acquire);
         size_t avail = m_capacity - (head - tail);
         if (frames > avail) frames = avail;
-        for (size_t i = 0; i < frames; i++) {
-            size_t idx = ((head + i) & m_mask) * 2;
-            m_buf[idx]     = data[i * 2];
-            m_buf[idx + 1] = data[i * 2 + 1];
+        size_t wr = head & m_mask;
+        size_t first = frames;
+        size_t to_end = m_capacity - wr;
+        if (first > to_end) first = to_end;
+        if (first > 0) {
+            memcpy(&m_buf[wr * 2], data, first * 2 * sizeof(int16_t));
+        }
+        size_t remain = frames - first;
+        if (remain > 0) {
+            memcpy(m_buf, data + first * 2, remain * 2 * sizeof(int16_t));
         }
         m_head.store(head + frames, std::memory_order_release);
         return frames;
@@ -48,10 +54,16 @@ public:
         size_t available = head - tail;
         size_t toRead = (frames < available) ? frames : available;
 
-        for (size_t i = 0; i < toRead; i++) {
-            size_t idx = ((tail + i) & m_mask) * 2;
-            data[i * 2]     = m_buf[idx];
-            data[i * 2 + 1] = m_buf[idx + 1];
+        size_t rd = tail & m_mask;
+        size_t first = toRead;
+        size_t to_end = m_capacity - rd;
+        if (first > to_end) first = to_end;
+        if (first > 0) {
+            memcpy(data, &m_buf[rd * 2], first * 2 * sizeof(int16_t));
+        }
+        size_t remain = toRead - first;
+        if (remain > 0) {
+            memcpy(data + first * 2, m_buf, remain * 2 * sizeof(int16_t));
         }
         // Fill remainder with silence
         if (toRead < frames) {
