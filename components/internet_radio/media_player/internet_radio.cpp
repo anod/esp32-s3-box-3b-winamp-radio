@@ -18,7 +18,7 @@
 // The pre-build script (patch_gmf_http.py) adds icy-metaint header
 // extraction to the GMF HTTP IO internal event handler. It stores
 // the value in this global, which we read on first ON_RESPONSE.
-extern "C" volatile int g_icy_metaint;
+extern "C" volatile int g_icy_metaint = 0;
 
 // FFT sample feed (defined in spectrum.cpp)
 extern void feed_fft_samples(const uint8_t *data, int size);

@@ -28,10 +28,19 @@ def _patch(env):
         src = f.read()
 
     if MARKER in src:
-        print("  [patch] esp_gmf_io_http.c: already patched (icy-metaint)")
+        # Migrate old patch: definition → extern declaration
+        old_def = "volatile int g_icy_metaint = 0;"
+        new_decl = "extern volatile int g_icy_metaint;"
+        if old_def in src:
+            src = src.replace(old_def, new_decl, 1)
+            with open(http_c, "w") as f:
+                f.write(src)
+            print("  [patch] esp_gmf_io_http.c: migrated definition to extern")
+        else:
+            print("  [patch] esp_gmf_io_http.c: already patched (icy-metaint)")
         return
 
-    # 1. Add global variable after TAG
+    # 1. Add extern declaration after TAG
     tag_line = 'static const char *TAG = "ESP_GMF_HTTP";'
     if tag_line not in src:
         print("  [patch] esp_gmf_io_http.c: TAG line not found — skipping")
@@ -39,7 +48,7 @@ def _patch(env):
     src = src.replace(
         tag_line,
         f"{tag_line}\n\n"
-        f"volatile int g_icy_metaint = 0;  {MARKER}",
+        f"extern volatile int g_icy_metaint;  {MARKER}",
     )
 
     # 2. Add icy-metaint check in _http_event_handle, before the final return
