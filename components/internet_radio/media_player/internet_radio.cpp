@@ -14,11 +14,15 @@
 #include "esp_http_client.h"
 #include <cstring>
 
-// ─── ICY metaint: captured by patched GMF HTTP event handler ───
-// The pre-build script (patch_gmf_http.py) adds icy-metaint header
-// extraction to the GMF HTTP IO internal event handler. It stores
-// the value in this global, which we read on first ON_RESPONSE.
+// ─── ICY headers: captured by patched GMF HTTP event handler ───
+// The pre-build script (patch_gmf_http.py) patches the GMF HTTP IO
+// internal event handler to capture icy-metaint and icy-br response
+// headers into these globals. We read them on first ON_RESPONSE.
+// Safety: headers are parsed during esp_http_client_fetch_headers()
+// which completes before any _http_read() call, so the globals are
+// always written before our ON_RESPONSE callback reads them.
 extern "C" volatile int g_icy_metaint = 0;
+extern "C" volatile int g_icy_bitrate = 0;  // kbps from icy-br header
 
 // FFT sample feed (defined in spectrum.cpp)
 extern void feed_fft_samples(const uint8_t *data, int size);
@@ -459,7 +463,9 @@ int InternetRadio::http_event_cb_(http_stream_event_msg_t *msg) {
     esp_http_client_set_header(client, "Icy-MetaData", "1");
     // Reset ICY state for new connection
     g_icy_metaint = 0;
+    g_icy_bitrate = 0;
     self->icy_metaint_ = 0;
+    self->bitrate_ = 0;
     self->icy_remaining_ = 0;
     self->icy_meta_remaining_ = 0;
     self->icy_meta_idx_ = 0;
@@ -470,7 +476,7 @@ int InternetRadio::http_event_cb_(http_stream_event_msg_t *msg) {
   if (msg->event_id == HTTP_STREAM_ON_RESPONSE) {
     auto client = static_cast<esp_http_client_handle_t>(msg->http_client);
 
-    // On first response, check for icy-metaint header
+    // On first response, check for ICY headers (captured by patched GMF)
     if (!self->icy_header_checked_) {
       self->icy_header_checked_ = true;
       int metaint = g_icy_metaint;
@@ -480,6 +486,11 @@ int InternetRadio::http_event_cb_(http_stream_event_msg_t *msg) {
         ESP_LOGI(TAG, "ICY metaint: %d bytes", metaint);
       } else {
         ESP_LOGD(TAG, "No ICY metadata in response");
+      }
+      int br = g_icy_bitrate;
+      if (br > 0) {
+        self->bitrate_ = br;
+        ESP_LOGI(TAG, "ICY bitrate: %d kbps", br);
       }
     }
 
@@ -554,7 +565,9 @@ int InternetRadio::player_event_cb_(esp_asp_event_pkt_t *pkt, void *ctx) {
       self->reconfig_sample_rate_((uint32_t)info->sample_rate);
     }
 
-    self->bitrate_ = info->bitrate;
+    if (info->bitrate > 0) {
+      self->bitrate_ = info->bitrate;
+    }
     // Update bridge sample rate for WROOM-32D resampler
     i2s_bridge::I2SBridge::bridge_sample_rate = info->sample_rate;
   }
