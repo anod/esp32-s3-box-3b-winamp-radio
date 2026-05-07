@@ -151,7 +151,7 @@ These workarounds are in `__init__.py` files and MUST be preserved:
 3. **`esp_lcd` excluded by ESPHome** → `include_builtin_idf_component("esp_lcd")` in winamp_display's `__init__.py`.
 4. **LovyanGFX defines** → `-DLGFX_USE_V1` and `-DLGFX_AUTODETECT` MUST be set via `cg.add_build_flag()`, NOT in headers (causes redefinition warnings).
 5. **Platform component schemas** → `media_player`, `switch`, `i2c` CANNOT be listed in `DEPENDENCIES = [...]` — causes import errors. Use `DEPENDENCIES = ["network"]` or `["i2c"]` only for non-platform deps.
-6. **GMF ICY metadata patch** → `patch_gmf_http.py` pre-build script patches `esp_gmf_io_http.c` to capture `icy-metaint` response header. The patch is idempotent (checks for marker before applying). Registered via `cg.add_platformio_option("extra_scripts", ...)`.
+6. **GMF ICY metadata patch** → `patch_gmf_http.py` patches `esp_gmf_io_http.c` to capture `icy-metaint` response header. Dual-mode: on rebuilds (managed_components exist), patches directly as a PlatformIO `pre:` script. On fresh builds (e.g. HA addon where components aren't fetched yet), injects a cmake hook into `CMakeLists.txt` that patches after `project()` fetches dependencies. Also supports CLI mode (`python3 patch_gmf_http.py <path>`) for the cmake hook to call. Idempotent (checks for marker before applying). Registered via `cg.add_platformio_option("extra_scripts", ...)`.
 
 ### Framework & Dependencies
 
