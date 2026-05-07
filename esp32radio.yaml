@@ -32,8 +32,13 @@ psram:
 
 external_components:
   - source:
-      type: local
-      path: components
+      type: git
+      url: https://github.com/anod/esp32-s3-box-3b-winamp-radio.git
+      ref: main
+    components:
+      - internet_radio
+      - winamp_display
+      - i2s_bridge
 
 logger:
   level: DEBUG
