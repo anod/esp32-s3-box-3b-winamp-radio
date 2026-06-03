@@ -4,6 +4,7 @@
 esphome:
   name: esp32radio
   friendly_name: "ESP32 Radio"
+  min_version: 2026.5.2
   platformio_options:
     build_flags:
       - -O2
@@ -44,10 +45,13 @@ logger:
   level: DEBUG
 
 api:
+  # 2026.5.x lowered the ESP32 default from 8 to 5; keep the old headroom explicit.
+  max_connections: 8
   encryption:
     key: !secret esp32radio_api_key
 
 ota:
+  # 2026.5.x requires OTA to stay a single entry.
   - platform: esphome
     password: !secret esp32radio_ota_password
 

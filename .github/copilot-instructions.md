@@ -155,7 +155,7 @@ These workarounds are in `__init__.py` files and MUST be preserved:
 
 ### Framework & Dependencies
 
-- ESPHome 2026.4.0, ESP-IDF framework (no Arduino)
+- ESPHome 2026.5.2, ESP-IDF framework (no Arduino)
 - ESP-IDF 5.5.4
 - ESP-GMF `esp_audio_simple_player` 0.9.6 (audio pipeline)
 - `esp_codec_dev` 1.5.2 (ES8311 driver)

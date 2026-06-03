@@ -65,7 +65,7 @@ jobs:
           fi
 
       - name: Install ESPHome and PlatformIO
-        run: python3 -m pip install --user esphome platformio
+        run: python3 -m pip install --user "esphome==2026.5.2" platformio
 
       - name: Add user-local bin to PATH
         run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"

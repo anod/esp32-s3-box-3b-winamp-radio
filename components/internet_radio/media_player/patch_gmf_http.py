@@ -227,6 +227,25 @@ def _inject_cmake_hook(cmake_lists_path, patch_script_path):
     print("  [patch] Injected cmake hook for deferred ICY patching")
 
 
+def _current_script_path(env):
+    """Return this PlatformIO extra script path.
+
+    Recent PlatformIO/SCons versions execute extra scripts without defining
+    __file__, so derive the path from PlatformIO's registered pre scripts.
+    """
+    if "__file__" in globals():
+        return os.path.abspath(globals()["__file__"])
+
+    for script in env.GetExtraScripts("pre"):
+        if script.startswith("pre:"):
+            script = script[4:]
+        script = env.subst(script)
+        if os.path.basename(script) == "patch_gmf_http.py":
+            return os.path.abspath(script)
+
+    raise RuntimeError("Unable to resolve patch_gmf_http.py path")
+
+
 def _patch(env):
     project_dir = env.subst("$PROJECT_DIR")
     http_c = os.path.join(
@@ -243,7 +262,7 @@ def _patch(env):
         print("  [patch] esp_gmf_io_http.c not found"
               " — injecting cmake hook for deferred patching")
         cmake_lists = os.path.join(project_dir, "CMakeLists.txt")
-        patch_script = os.path.abspath(__file__)
+        patch_script = _current_script_path(env)
         _inject_cmake_hook(cmake_lists, patch_script)
 
 
