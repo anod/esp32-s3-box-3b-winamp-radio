@@ -26,6 +26,7 @@ class I2SBridge final : public switch_::Switch, public Component {
   // Called from audio_process_i2s (separate TU)
   static i2s_chan_handle_t get_tx_handle();
   static bool is_active();
+  static void set_sample_rate(uint32_t sample_rate);
   static volatile uint32_t bridge_sample_rate;
 
  protected:

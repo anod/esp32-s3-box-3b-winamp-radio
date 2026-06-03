@@ -59,8 +59,9 @@ async def to_code(config):
 
     # ESP-GMF audio pipeline (HTTP → decoder → PCM output callback)
     add_idf_component(name="espressif/esp_audio_simple_player", ref="0.9.6~1")
-    # ES8311 codec driver (register-level control via I2C)
-    add_idf_component(name="espressif/esp_codec_dev", ref="1.5.2")
+    # ES8311 codec driver (register-level control via I2C).
+    # 1.5.10 carries current ESP-IDF 5.5+/toolchain fixes used by ESPHome 2026.5.
+    add_idf_component(name="espressif/esp_codec_dev", ref="1.5.10")
 
     cg.add(var.set_i2s_bclk_pin(config[CONF_I2S_BCLK_PIN]))
     cg.add(var.set_i2s_lrclk_pin(config[CONF_I2S_LRCLK_PIN]))

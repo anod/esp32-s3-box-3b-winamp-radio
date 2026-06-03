@@ -149,6 +149,16 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   i2s_chan_handle_t i2s_tx_{nullptr};
   uint32_t current_sample_rate_{44100};
 
+  // Runtime diagnostics (written on Core 0, reported/reset on Core 1)
+  volatile uint32_t diag_pcm_callbacks_{0};
+  volatile uint32_t diag_pcm_bytes_{0};
+  volatile uint32_t diag_i2s0_timeouts_{0};
+  volatile uint32_t diag_i2s0_errors_{0};
+  volatile uint32_t diag_bridge_timeouts_{0};
+  volatile uint32_t diag_bridge_errors_{0};
+  volatile uint32_t diag_bridge_short_writes_{0};
+  unsigned long diag_last_report_ms_{0};
+
   // Pin configuration
   int bclk_pin_{17};
   int lrclk_pin_{45};

@@ -158,7 +158,7 @@ These workarounds are in `__init__.py` files and MUST be preserved:
 - ESPHome 2026.5.2, ESP-IDF framework (no Arduino)
 - ESP-IDF 5.5.4
 - ESP-GMF `esp_audio_simple_player` 0.9.6 (audio pipeline)
-- `esp_codec_dev` 1.5.2 (ES8311 driver)
+- `esp_codec_dev` 1.5.10 (ES8311 driver)
 - LovyanGFX 1.2.19 (pinned via `cg.add_library`)
 
 ## ESPHome Pitfalls (Hard-Won Lessons)
@@ -190,8 +190,8 @@ ESPHome's `i2c:` component owns I2C bus 0 (GPIO 8/18). LovyanGFX `tft_.init()` t
 
 - Different streams use different sample rates (44100, 48000, etc.)
 - `player_event_cb_` detects sample rate from ESP-GMF codec info events
-- `reconfig_sample_rate_()` updates I2S0 TX channel and `I2SBridge::bridge_sample_rate`
-- If bridge rate not updated, the I2S bridge resampler won't engage → audio plays at wrong speed
+- `reconfig_sample_rate_()` updates I2S0 TX, and the S3-side `I2SBridge::set_sample_rate()` now reconfigures I2S1 when BT output is active
+- If I2S1 is left pinned to 44.1kHz while the stream is 48kHz, BT output can backpressure the PCM callback and make playback rough
 
 ### Buffer Underrun Watchdog
 
@@ -220,6 +220,13 @@ See **ESPHome API Protocol Gap** section above for full details. Key rules:
 - Use `button` entities for next/prev (work via `on_press` lambdas)
 - `speaker_source` has the same gap — it is NOT a viable alternative
 - Our C++ handlers for NEXT/PREV work internally (automations/lambdas) and will auto-activate when protocol is updated
+
+### ESPHome 2026.5 Upgrade Notes
+
+- `api.max_connections` now defaults to **5** on ESP32. This project relies on the old 8-connection headroom, so keep `api.max_connections: 8` explicit in `esp32radio.yaml`.
+- `ota:` must remain a **single** `platform: esphome` entry. Do not add multiple OTA listeners on different ports.
+- The custom components for this repo are loaded from local `./components` during development so ESPHome compiles the checked-out sources instead of refetching `main`.
+- The `ComponentIterator` / `on_media_player()` 2026.5 breaking change does **not** apply here because these components do not implement `ComponentIterator`.
 
 ### WiFi and Network APIs
 
@@ -259,13 +266,14 @@ Separate PlatformIO project for an ESP32-WROOM-32D that receives I2S audio from 
 - **Architecture**: I2S0 slave RX → lock-free `PcmRingBuffer` → A2DP source callback
 - **I2S wiring**: S3 GPIO 10→25 (BCLK), GPIO 14→26 (LRCK), GPIO 11→27 (DOUT→DIN), plus common GND
 - **Config**: `bt-bridge/include/config.h` — `BT_SINK_NAME` (default `"JBL Flip 4"`), ring buffer size 8192 frames
-- **DMA tuning**: I2S1 on the S3 side needs 16×480 DMA frames with 10ms write timeout to avoid drops
+- **DMA tuning**: I2S1 on the S3 side uses 16×480 DMA frames
 - ESP32-S3 does NOT support Bluetooth Classic (BR/EDR) — only BLE 5.0. A2DP requires the original ESP32.
 - WiFi and BT Classic cannot coexist on a single ESP32 — hence the two-board wired I2S approach.
 - `audio_process_i2s` override MUST be in a separate `.cpp` — weak-symbol overrides require separate translation units.
 - Never set `*continueI2S=false` in `audio_process_i2s` — it removes I2S0 blocking write pacing, causing the decoder to run at CPU speed and flood downstream buffers.
-- Bridge includes linear interpolation resampler for non-44100Hz sources (e.g., BBC at 48kHz).
+- The checked-in WROOM bridge firmware does **not** currently contain the resampler described in older notes; verify BT behavior with serial stats before assuming 48kHz streams are handled correctly end-to-end.
 - Write 960 bytes of silence after `i2s_channel_enable()` to prevent BT speaker crack on reconnect.
+- The S3 firmware now logs once-per-second `Audio diag:` lines with I2S0/I2S1 timeout and short-write counters; use these before changing buffering or BT code.
 
 ### Throughput Capacity
 
@@ -275,15 +283,14 @@ The bridge chain comfortably handles maximum internet radio bitrates. End-to-end
 |---|---|---|
 | Internet stream (compressed) | ≤320 kbps (MP3) / 256 kbps (AAC) | — |
 | Decoded PCM on S3 | 1,411 kbps (44.1kHz) / 1,536 kbps (48kHz) | — |
-| I2S1 TX wire (fixed 44100 Hz 16-bit stereo) | 1,411 kbps | 174ms (16×480 DMA frames) |
+| I2S1 TX wire (matches current stream rate on the S3) | 1,411 kbps (44.1kHz) / 1,536 kbps (48kHz) | 174ms at 44.1kHz (16×480 DMA frames) |
 | Ring buffer on WROOM-32D | — | 186ms (8192 frames × 4 bytes = 32KB) |
 | A2DP SBC to BT speaker | ~345 kbps | — |
 | BT Classic EDR link (single device) | ~3 Mbps available | — |
 
 - **Total jitter absorption**: ~360ms (DMA + ring buffer) before underrun
 - **BT headroom**: Single A2DP SBC stream at ~345 kbps uses ~12% of EDR capacity
-- **Resampler limits**: `resBuf[4096*2]` with `outIdx < 4096` guard. For 48kHz→44.1kHz: 2048 input → ~1882 output frames (safe). Sources below ~22,050 Hz would truncate output — not a crash, but internet radio streams are always ≥ 22,050 Hz
-- **10ms write timeout**: Intentionally short to avoid blocking Core 0 decoder — drops frames rather than stalling audio pipeline
+- **BT diagnosis**: If playback is rough with BT enabled, inspect both the S3 `Audio diag:` counters and the WROOM `underruns` / buffer occupancy before assuming the radio stream itself is at fault
 
 ### Verifying Throughput on Hardware
 
@@ -297,13 +304,17 @@ The bt-bridge firmware already prints stats every 3 seconds on serial (`bt-bridg
    pio device monitor -e bt-bridge -b 115200
    ```
 2. **Stream a 320kbps MP3** (max common internet radio bitrate) or a **48kHz AAC** stream (highest sample rate seen in practice, e.g., BBC streams). Use HA `play_media` or the station list.
-3. **Check bt-bridge serial output** — healthy values for 44.1kHz stereo:
-   - `I2S in: ~44100 f/s` — slave RX matching the master clock
-   - `A2DP out: ~44100 f/s` — SBC encoder keeping up
-   - `buf: <8192` — ring buffer not full (backpressure OK)
-   - `underruns: 0` — no starvation
-4. **For 48kHz sources**, verify the S3 ESPHome log shows `SampleRate (Hz): 48000` and the bt-bridge still reports ~44100 f/s out (resampler is working).
-5. **Failure indicators**: rising `underruns` count, `I2S in` significantly below 44100, or `buf` stuck at 0 or 8192 (empty/full).
+3. **Check the S3 ESPHome log** — healthy values show `Audio diag:` once per second with:
+   - `i2s0_to=0 i2s0_err=0`
+   - `bridge_to=0 bridge_err=0 bridge_short=0`
+   - sample rate matching the active stream
+4. **Check bt-bridge serial output** — healthy values for a 44.1kHz test stream:
+   - `I2S in: ~44100 f/s`
+   - `A2DP out: ~44100 f/s`
+   - `buf: <8192`
+   - `underruns: 0`
+5. **For 48kHz sources**, first confirm the S3 log shows the expected sample rate and clean bridge counters. Then check whether the WROOM still reports stable `I2S in`, `A2DP out`, and `underruns`; do not assume resampling support unless the firmware actually contains it.
+6. **Failure indicators**: rising S3 bridge counters, rising WROOM `underruns`, `I2S in` far from the expected stream rate, or `buf` stuck at 0 or 8192 (empty/full).
 
 ## Coding Guidelines
 
@@ -328,7 +339,7 @@ When reviewing changes, always verify:
 - **Draw loop cost**: No `color565()` calls, `WiFi.localIP()`, `network::get_ip_addresses()`, or heap-allocating functions inside render loops. Pre-compute in `setup()`.
 - **Audio callback cost**: `pcm_output_cb_` and `feed_fft_samples` run on Core 0 — no `millis()`, `ESP_LOGI`, or heap allocations. Use `volatile` counters, not function calls.
 - **Overflow**: `millis()` arithmetic must use unsigned subtraction. Intermediate touch/volume math must stay within `int` range. Volume Q8 math uses `int32_t` with saturation.
-- **I2S bridge**: `audio_process_i2s` must stay in its own `.cpp`. Never disable `continueI2S`. Update `bridge_sample_rate` when stream format changes.
+- **I2S bridge**: `audio_process_i2s` must stay in its own `.cpp`. Never disable `continueI2S`. Keep the S3-side I2S1 clock in sync with stream format changes and watch `Audio diag:` bridge counters when debugging BT playback.
 - **I2C bus**: All GT911 reads must go through ESPHome's I2C bus (`read_register16`), never `lgfx::i2c` or `Wire`.
 - **Touch zones**: Must match drawn button coordinates. GT911 raw coords = screen coords (no offset). Expand zones for buttons near screen edges.
 - **UI consistency**: New buttons must use `draw_wa_btn_()` with the Winamp 2 palette. Update `touch_highlight_` comment when adding new indices.

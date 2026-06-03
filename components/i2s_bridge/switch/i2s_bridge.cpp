@@ -11,6 +11,16 @@ namespace i2s_bridge {
 
 static const char *const TAG = "i2s_bridge";
 
+namespace {
+
+void prime_bridge_tx_(i2s_chan_handle_t handle) {
+  uint8_t silence[960] = {};
+  size_t written = 0;
+  i2s_channel_write(handle, silence, sizeof(silence), &written, 100);
+}
+
+}  // namespace
+
 // Static members
 i2s_chan_handle_t I2SBridge::tx_handle_ = nullptr;
 volatile bool I2SBridge::active_ = false;
@@ -18,6 +28,28 @@ volatile uint32_t I2SBridge::bridge_sample_rate = 44100;
 
 i2s_chan_handle_t I2SBridge::get_tx_handle() { return tx_handle_; }
 bool I2SBridge::is_active() { return active_; }
+void I2SBridge::set_sample_rate(uint32_t sample_rate) {
+  if (sample_rate == 0) {
+    return;
+  }
+
+  uint32_t old_rate = bridge_sample_rate;
+  bridge_sample_rate = sample_rate;
+
+  i2s_chan_handle_t handle = tx_handle_;
+  if (!active_ || handle == nullptr || sample_rate == old_rate) {
+    return;
+  }
+
+  ESP_LOGI(TAG, "Reconfiguring I2S1 bridge: %lu -> %lu Hz",
+           (unsigned long) old_rate, (unsigned long) sample_rate);
+
+  i2s_channel_disable(handle);
+  i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(sample_rate);
+  ESP_ERROR_CHECK(i2s_channel_reconfig_std_clock(handle, &clk_cfg));
+  ESP_ERROR_CHECK(i2s_channel_enable(handle));
+  prime_bridge_tx_(handle);
+}
 
 void I2SBridge::setup() {
   bool restored;
@@ -67,7 +99,7 @@ void I2SBridge::init_i2s_() {
   ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &tx_handle_, nullptr));
 
   i2s_std_config_t std_cfg = {
-      .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(44100),
+      .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(bridge_sample_rate),
       .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
       .gpio_cfg = {
           .mclk = I2S_GPIO_UNUSED,
@@ -82,12 +114,11 @@ void I2SBridge::init_i2s_() {
   ESP_ERROR_CHECK(i2s_channel_enable(tx_handle_));
 
   // Write silence to prevent pop/crack on BT speaker
-  uint8_t silence[960] = {};
-  size_t written = 0;
-  i2s_channel_write(tx_handle_, silence, sizeof(silence), &written, 100);
+  prime_bridge_tx_(tx_handle_);
 
-  ESP_LOGI(TAG, "I2S1: BCLK=%d LRCK=%d DOUT=%d DMA=%d frames",
-           this->bclk_pin_, this->lrck_pin_, this->dout_pin_, 16 * 480);
+  ESP_LOGI(TAG, "I2S1: BCLK=%d LRCK=%d DOUT=%d DMA=%d frames (%luHz)",
+           this->bclk_pin_, this->lrck_pin_, this->dout_pin_, 16 * 480,
+           (unsigned long) bridge_sample_rate);
 }
 
 void I2SBridge::deinit_i2s_() {

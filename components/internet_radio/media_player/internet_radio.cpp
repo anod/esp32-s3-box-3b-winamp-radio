@@ -219,6 +219,44 @@ void InternetRadio::loop() {
     }
   }
 
+  {
+    unsigned long now = millis();
+    if (now - this->diag_last_report_ms_ >= 1000) {
+      this->diag_last_report_ms_ = now;
+
+      uint32_t pcm_callbacks = this->diag_pcm_callbacks_;
+      uint32_t pcm_bytes = this->diag_pcm_bytes_;
+      uint32_t i2s0_timeouts = this->diag_i2s0_timeouts_;
+      uint32_t i2s0_errors = this->diag_i2s0_errors_;
+      uint32_t bridge_timeouts = this->diag_bridge_timeouts_;
+      uint32_t bridge_errors = this->diag_bridge_errors_;
+      uint32_t bridge_short_writes = this->diag_bridge_short_writes_;
+
+      this->diag_pcm_callbacks_ = 0;
+      this->diag_pcm_bytes_ = 0;
+      this->diag_i2s0_timeouts_ = 0;
+      this->diag_i2s0_errors_ = 0;
+      this->diag_bridge_timeouts_ = 0;
+      this->diag_bridge_errors_ = 0;
+      this->diag_bridge_short_writes_ = 0;
+
+      if (this->play_state_ == PS_PLAYING || pcm_callbacks > 0 ||
+          i2s0_timeouts > 0 || i2s0_errors > 0 || bridge_timeouts > 0 ||
+          bridge_errors > 0 || bridge_short_writes > 0) {
+        ESP_LOGI(
+            TAG,
+            "Audio diag: cb=%lu bytes=%lu i2s0_to=%lu i2s0_err=%lu "
+            "bridge_to=%lu bridge_err=%lu bridge_short=%lu sr=%lu bt=%s",
+            (unsigned long) pcm_callbacks, (unsigned long) pcm_bytes,
+            (unsigned long) i2s0_timeouts, (unsigned long) i2s0_errors,
+            (unsigned long) bridge_timeouts, (unsigned long) bridge_errors,
+            (unsigned long) bridge_short_writes,
+            (unsigned long) this->current_sample_rate_,
+            i2s_bridge::I2SBridge::is_active() ? "on" : "off");
+      }
+    }
+  }
+
   // Non-blocking PA enable (replaces 200ms blocking delay)
   // Skip if BT bridge is active — bridge mutes internal speaker
   if (this->pa_pending_ && (millis() - this->pa_pending_ms_ >= 200)) {
@@ -364,6 +402,8 @@ void InternetRadio::init_http_io_() {
   http_cfg.crt_bundle_attach = esp_crt_bundle_attach;
   http_cfg.event_handle = http_event_cb_;
   http_cfg.user_data = this;
+  http_cfg.io_cfg.buffer_cfg.io_size = 8 * 1024;
+  http_cfg.io_cfg.buffer_cfg.buffer_size = 128 * 1024;
 
   esp_gmf_err_t ret = esp_gmf_io_http_init(&http_cfg, &this->http_io_);
   if (ret != ESP_GMF_ERR_OK) {
@@ -371,7 +411,9 @@ void InternetRadio::init_http_io_() {
     return;
   }
   esp_audio_simple_player_register_io(this->player_, this->http_io_);
-  ESP_LOGI(TAG, "HTTP IO registered (HTTPS cert bundle enabled)");
+  ESP_LOGI(TAG, "HTTP IO registered (HTTPS cert bundle enabled, io=%d ring=%d)",
+           http_cfg.io_cfg.buffer_cfg.io_size,
+           http_cfg.io_cfg.buffer_cfg.buffer_size);
 }
 
 // ─── HTTP event callback (Core 0) — ICY metadata extraction ──
@@ -506,6 +548,8 @@ int InternetRadio::http_event_cb_(http_stream_event_msg_t *msg) {
 int InternetRadio::pcm_output_cb_(uint8_t *data, int size, void *ctx) {
   auto *self = static_cast<InternetRadio *>(ctx);
   size_t written = 0;
+  self->diag_pcm_callbacks_++;
+  self->diag_pcm_bytes_ += size;
 
   // 1. Feed FFT BEFORE volume scaling — visualizer needs full-amplitude PCM
   feed_fft_samples(data, size);
@@ -526,7 +570,10 @@ int InternetRadio::pcm_output_cb_(uint8_t *data, int size, void *ctx) {
   // 3. Write to ES8311 speaker (bounded timeout to avoid hanging stop/reconnect)
   esp_err_t err = i2s_channel_write(self->i2s_tx_, data, size, &written,
                                     pdMS_TO_TICKS(100));
-  if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
+  if (err == ESP_ERR_TIMEOUT) {
+    self->diag_i2s0_timeouts_++;
+  } else if (err != ESP_OK) {
+    self->diag_i2s0_errors_++;
     return -1;
   }
 
@@ -535,7 +582,15 @@ int InternetRadio::pcm_output_cb_(uint8_t *data, int size, void *ctx) {
   i2s_chan_handle_t bridge_tx = i2s_bridge::I2SBridge::get_tx_handle();
   if (i2s_bridge::I2SBridge::is_active() && bridge_tx) {
     size_t bw = 0;
-    i2s_channel_write(bridge_tx, data, size, &bw, pdMS_TO_TICKS(10));
+    esp_err_t bridge_err = i2s_channel_write(bridge_tx, data, size, &bw, 0);
+    if (bridge_err == ESP_ERR_TIMEOUT) {
+      self->diag_bridge_timeouts_++;
+    } else if (bridge_err != ESP_OK) {
+      self->diag_bridge_errors_++;
+    }
+    if (bw < (size_t) size) {
+      self->diag_bridge_short_writes_++;
+    }
   }
 
   // 5. Watchdog frame count
@@ -568,8 +623,7 @@ int InternetRadio::player_event_cb_(esp_asp_event_pkt_t *pkt, void *ctx) {
     if (info->bitrate > 0) {
       self->bitrate_ = info->bitrate;
     }
-    // Update bridge sample rate for WROOM-32D resampler
-    i2s_bridge::I2SBridge::bridge_sample_rate = info->sample_rate;
+    i2s_bridge::I2SBridge::set_sample_rate((uint32_t) info->sample_rate);
   }
 
   if (pkt->type == ESP_ASP_EVENT_TYPE_STATE) {
