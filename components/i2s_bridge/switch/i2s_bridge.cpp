@@ -33,22 +33,10 @@ void I2SBridge::set_sample_rate(uint32_t sample_rate) {
     return;
   }
 
-  uint32_t old_rate = bridge_sample_rate;
-  bridge_sample_rate = sample_rate;
-
-  i2s_chan_handle_t handle = tx_handle_;
-  if (!active_ || handle == nullptr || sample_rate == old_rate) {
-    return;
+  if (sample_rate != bridge_sample_rate) {
+    ESP_LOGI(TAG, "I2S1 bridge stays at %lu Hz; S3 resamples %lu Hz stream for BT",
+             (unsigned long) bridge_sample_rate, (unsigned long) sample_rate);
   }
-
-  ESP_LOGI(TAG, "Reconfiguring I2S1 bridge: %lu -> %lu Hz",
-           (unsigned long) old_rate, (unsigned long) sample_rate);
-
-  i2s_channel_disable(handle);
-  i2s_std_clk_config_t clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(sample_rate);
-  ESP_ERROR_CHECK(i2s_channel_reconfig_std_clock(handle, &clk_cfg));
-  ESP_ERROR_CHECK(i2s_channel_enable(handle));
-  prime_bridge_tx_(handle);
 }
 
 void I2SBridge::setup() {

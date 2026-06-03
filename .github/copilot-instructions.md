@@ -190,8 +190,8 @@ ESPHome's `i2c:` component owns I2C bus 0 (GPIO 8/18). LovyanGFX `tft_.init()` t
 
 - Different streams use different sample rates (44100, 48000, etc.)
 - `player_event_cb_` detects sample rate from ESP-GMF codec info events
-- `reconfig_sample_rate_()` updates I2S0 TX, and the S3-side `I2SBridge::set_sample_rate()` now reconfigures I2S1 when BT output is active
-- If I2S1 is left pinned to 44.1kHz while the stream is 48kHz, BT output can backpressure the PCM callback and make playback rough
+- `reconfig_sample_rate_()` updates I2S0 TX for the ES8311 speaker path
+- The S3-side BT bridge keeps I2S1 fixed at 44.1kHz and `write_bridge_pcm_()` linearly resamples non-44.1kHz streams before writing to the WROOM bridge. This is required because the WROOM A2DP callback consumes 44.1kHz frames.
 
 ### Buffer Underrun Watchdog
 
@@ -267,12 +267,12 @@ Separate PlatformIO project for an ESP32-WROOM-32D that receives I2S audio from 
 - **Architecture**: I2S0 slave RX → lock-free `PcmRingBuffer` → A2DP source callback
 - **I2S wiring**: S3 GPIO 10→25 (BCLK), GPIO 14→26 (LRCK), GPIO 11→27 (DOUT→DIN), plus common GND
 - **Config**: `bt-bridge/include/config.h` — `BT_SINK_NAME` (default `"JBL Flip 4"`), ring buffer size 8192 frames
-- **DMA tuning**: I2S1 on the S3 side uses 16×480 DMA frames
+- **DMA tuning**: I2S1 on the S3 side uses 16×480 DMA frames at fixed 44.1kHz
 - ESP32-S3 does NOT support Bluetooth Classic (BR/EDR) — only BLE 5.0. A2DP requires the original ESP32.
 - WiFi and BT Classic cannot coexist on a single ESP32 — hence the two-board wired I2S approach.
 - `audio_process_i2s` override MUST be in a separate `.cpp` — weak-symbol overrides require separate translation units.
 - Never set `*continueI2S=false` in `audio_process_i2s` — it removes I2S0 blocking write pacing, causing the decoder to run at CPU speed and flood downstream buffers.
-- The checked-in WROOM bridge firmware does **not** currently contain the resampler described in older notes; verify BT behavior with serial stats before assuming 48kHz streams are handled correctly end-to-end.
+- The WROOM bridge firmware consumes/outputs 44.1kHz A2DP frames. Resampling for non-44.1kHz streams happens on the S3 before I2S1 output.
 - Write 960 bytes of silence after `i2s_channel_enable()` to prevent BT speaker crack on reconnect.
 - The S3 firmware now logs once-per-second `Audio diag:` lines with I2S0/I2S1 timeout and short-write counters; use these before changing buffering or BT code.
 
@@ -284,7 +284,7 @@ The bridge chain comfortably handles maximum internet radio bitrates. End-to-end
 |---|---|---|
 | Internet stream (compressed) | ≤320 kbps (MP3) / 256 kbps (AAC) | — |
 | Decoded PCM on S3 | 1,411 kbps (44.1kHz) / 1,536 kbps (48kHz) | — |
-| I2S1 TX wire (matches current stream rate on the S3) | 1,411 kbps (44.1kHz) / 1,536 kbps (48kHz) | 174ms at 44.1kHz (16×480 DMA frames) |
+| I2S1 TX wire (fixed 44.1kHz after S3-side resampling) | 1,411 kbps | 174ms (16×480 DMA frames) |
 | Ring buffer on WROOM-32D | — | 186ms (8192 frames × 4 bytes = 32KB) |
 | A2DP SBC to BT speaker | ~345 kbps | — |
 | BT Classic EDR link (single device) | ~3 Mbps available | — |
@@ -314,7 +314,7 @@ The bt-bridge firmware already prints stats every 3 seconds on serial (`bt-bridg
    - `A2DP out: ~44100 f/s`
    - `buf: <8192`
    - `underruns: 0`
-5. **For 48kHz sources**, first confirm the S3 log shows the expected sample rate and clean bridge counters. Then check whether the WROOM still reports stable `I2S in`, `A2DP out`, and `underruns`; do not assume resampling support unless the firmware actually contains it.
+5. **For non-44.1kHz sources** (e.g. NPR's 32kHz MP3 or 48kHz AAC), first confirm the S3 log shows the expected stream sample rate and clean bridge counters. The WROOM should still report `I2S in`/`A2DP out` near 44.1kHz because the S3 resamples the bridge feed.
 6. **Failure indicators**: rising S3 bridge counters, rising WROOM `underruns`, `I2S in` far from the expected stream rate, or `buf` stuck at 0 or 8192 (empty/full).
 
 ## Coding Guidelines

@@ -584,25 +584,103 @@ int InternetRadio::pcm_output_cb_(uint8_t *data, int size, void *ctx) {
   }
 
   // 4. Write to I2S bridge (BT speaker) if active
-  // Snapshot handle to avoid race with Core 1 teardown (deinit_i2s_ nulls tx_handle_)
-  i2s_chan_handle_t bridge_tx = i2s_bridge::I2SBridge::get_tx_handle();
-  if (i2s_bridge::I2SBridge::is_active() && bridge_tx) {
-    size_t bw = 0;
-    esp_err_t bridge_err = i2s_channel_write(bridge_tx, data, size, &bw, 0);
-    if (bridge_err == ESP_ERR_TIMEOUT) {
-      self->diag_bridge_timeouts_++;
-    } else if (bridge_err != ESP_OK) {
-      self->diag_bridge_errors_++;
-    }
-    if (bw < (size_t) size) {
-      self->diag_bridge_short_writes_++;
-    }
-  }
+  self->write_bridge_pcm_(data, size);
 
   // 5. Watchdog frame count
   g_audio_frame_count++;
 
   return (int)written;
+}
+
+void InternetRadio::write_bridge_pcm_(const uint8_t *data, int size) {
+  i2s_chan_handle_t bridge_tx = i2s_bridge::I2SBridge::get_tx_handle();
+  if (!i2s_bridge::I2SBridge::is_active() || bridge_tx == nullptr || size <= 0) {
+    return;
+  }
+
+  const uint32_t in_rate = this->current_sample_rate_;
+  const uint8_t *out_data = data;
+  int out_size = size;
+
+  if (in_rate != BRIDGE_OUTPUT_RATE && in_rate > 0) {
+    const int16_t *in = reinterpret_cast<const int16_t *>(data);
+    int in_frames = size / (2 * sizeof(int16_t));
+    if (in_frames <= 0) {
+      return;
+    }
+
+    if (!this->bridge_resample_have_prev_) {
+      this->bridge_resample_prev_l_ = in[0];
+      this->bridge_resample_prev_r_ = in[1];
+      this->bridge_resample_pos_q16_ = 1u << 16;
+      this->bridge_resample_have_prev_ = true;
+    }
+
+    uint32_t step_q16 = (uint32_t) (((uint64_t) in_rate << 16) / BRIDGE_OUTPUT_RATE);
+    if (step_q16 == 0) {
+      step_q16 = 1;
+    }
+
+    int out_frames = 0;
+    uint32_t end_q16 = (uint32_t) in_frames << 16;
+    while (this->bridge_resample_pos_q16_ < end_q16 &&
+           out_frames < BRIDGE_RESAMPLE_MAX_FRAMES) {
+      uint32_t idx = this->bridge_resample_pos_q16_ >> 16;
+      uint32_t frac = this->bridge_resample_pos_q16_ & 0xFFFFu;
+
+      int16_t al;
+      int16_t ar;
+      if (idx == 0) {
+        al = this->bridge_resample_prev_l_;
+        ar = this->bridge_resample_prev_r_;
+      } else {
+        al = in[(idx - 1) * 2];
+        ar = in[(idx - 1) * 2 + 1];
+      }
+      int16_t bl = in[idx * 2];
+      int16_t br = in[idx * 2 + 1];
+
+      int32_t dl = (int32_t) bl - al;
+      int32_t dr = (int32_t) br - ar;
+      this->bridge_resample_buf_[out_frames * 2] =
+          (int16_t) (al + ((dl * (int32_t) frac) >> 16));
+      this->bridge_resample_buf_[out_frames * 2 + 1] =
+          (int16_t) (ar + ((dr * (int32_t) frac) >> 16));
+
+      this->bridge_resample_pos_q16_ += step_q16;
+      out_frames++;
+    }
+
+    if (out_frames >= BRIDGE_RESAMPLE_MAX_FRAMES &&
+        this->bridge_resample_pos_q16_ < end_q16) {
+      this->diag_bridge_short_writes_++;
+    }
+
+    this->bridge_resample_pos_q16_ -= end_q16;
+    this->bridge_resample_prev_l_ = in[(in_frames - 1) * 2];
+    this->bridge_resample_prev_r_ = in[(in_frames - 1) * 2 + 1];
+
+    out_data = reinterpret_cast<const uint8_t *>(this->bridge_resample_buf_);
+    out_size = out_frames * 2 * sizeof(int16_t);
+  } else {
+    this->bridge_resample_have_prev_ = false;
+    this->bridge_resample_pos_q16_ = 1u << 16;
+  }
+
+  if (out_size <= 0) {
+    return;
+  }
+
+  size_t bw = 0;
+  esp_err_t bridge_err = i2s_channel_write(bridge_tx, out_data, out_size, &bw, 0);
+  if (bridge_err == ESP_ERR_TIMEOUT) {
+    this->diag_bridge_timeouts_++;
+  } else if (bridge_err != ESP_OK) {
+    this->diag_bridge_errors_++;
+  }
+  if (bw < (size_t) out_size) {
+    this->diag_bridge_short_writes_++;
+  }
 }
 
 // ─── Player event callback (Core 0, ESP-GMF worker thread)
@@ -624,6 +702,8 @@ int InternetRadio::player_event_cb_(esp_asp_event_pkt_t *pkt, void *ctx) {
     if ((uint32_t)info->sample_rate != self->current_sample_rate_ &&
         info->sample_rate > 0) {
       self->reconfig_sample_rate_((uint32_t)info->sample_rate);
+      self->bridge_resample_have_prev_ = false;
+      self->bridge_resample_pos_q16_ = 1u << 16;
     }
 
     if (info->bitrate > 0) {

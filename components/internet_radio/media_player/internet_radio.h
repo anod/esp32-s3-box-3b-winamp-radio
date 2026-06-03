@@ -114,6 +114,7 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   void init_player_();
   void init_http_io_();
   void reconfig_sample_rate_(uint32_t new_rate);
+  void write_bridge_pcm_(const uint8_t *data, int size);
 
   // ESP-GMF callbacks (static, Core 0)
   static int pcm_output_cb_(uint8_t *data, int size, void *ctx);
@@ -149,6 +150,13 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   // I2S0 TX channel (to ES8311 codec)
   i2s_chan_handle_t i2s_tx_{nullptr};
   uint32_t current_sample_rate_{44100};
+  uint32_t bridge_resample_pos_q16_{1u << 16};
+  int16_t bridge_resample_prev_l_{0};
+  int16_t bridge_resample_prev_r_{0};
+  bool bridge_resample_have_prev_{false};
+  static constexpr uint32_t BRIDGE_OUTPUT_RATE = 44100;
+  static constexpr int BRIDGE_RESAMPLE_MAX_FRAMES = 4096;
+  int16_t bridge_resample_buf_[BRIDGE_RESAMPLE_MAX_FRAMES * 2]{};
 
   // Runtime diagnostics (written on Core 0, reported/reset on Core 1)
   volatile uint32_t diag_pcm_callbacks_{0};
