@@ -78,7 +78,7 @@ Split across two cores for zero audio-path overhead:
 
 - UI volume: 22 discrete steps (0–21), stored in NVS
 - Internal: Q8 fixed-point gain (`sw_vol_gain_`) applied in `pcm_output_cb_` to PCM samples before I2S write
-- Perceptual dB curve: -42 dB (step 1) to +6 dB (step 21), ~2.3 dB/step. Step 18 ≈ unity (0 dB).
+- Perceptual curve is capped at unity gain to avoid clipping hot streams; the top steps approach Q8 unity (`256`) without software boost. The ES8311 analog output still provides speaker gain.
 - Pre-computed lookup table `VOL_Q8[22]` — no floating-point math in audio path
 - Clipping handled via `int32_t` intermediate with saturation to `INT16_MIN`/`INT16_MAX`
 
@@ -199,6 +199,7 @@ ESPHome's `i2c:` component owns I2C bus 0 (GPIO 8/18). LovyanGFX `tft_.init()` t
 - **Solution**: `g_audio_frame_count` volatile counter is incremented in `pcm_output_cb_` on Core 0 (single increment — near-zero cost). `loop()` on Core 1 checks every second: if frame count hasn't advanced for 10 consecutive checks while playing → auto-reconnect
 - The stall counter is reset on every `connect_station_()` and `play_media` call
 - Any new code path that starts playback must also reset `watchdog_stall_count_ = 0`
+- Playback resume after power-cycle is controlled by the persisted `radio_play` flag. Do not set `auto_play_pending_` unconditionally on boot; only resume if the last intentional state was playing.
 - Do NOT call `millis()` or other expensive functions inside `pcm_output_cb_` or `feed_fft_samples` — they run on Core 0's audio path and can cause crackling
 
 ### Non-Blocking PA Enable

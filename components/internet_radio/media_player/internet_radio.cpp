@@ -37,20 +37,18 @@ namespace internet_radio {
 static const char *const TAG = "internet_radio";
 
 // Software volume: UI step (0–21) → Q8 fixed-point gain.
-// Perceptual dB curve: -42 dB to +6 dB in 21 steps (2.29 dB/step).
-// gain = 10^(dB/20) * 256, where dB = -42 + step * (48/21).
-// Step 18 ≈ unity (0 dB), steps 19-21 provide +2/+4/+6 dB boost.
-// Clipping is handled in pcm_output_cb_ (int32_t→int16_t saturation).
+// Perceptual dB curve capped at unity; hot speech streams can clip if the
+// software path boosts above 0 dB before the ES8311 analog stage.
 static const uint16_t VOL_Q8[22] = {
     0,                                          // 0: mute
     3,   3,   5,   6,   8,  10,  13,  17,      // 1–8:  ~-40 to -24 dB
     22,  28,  37,  48,  62,  81, 106, 138,      // 9–16: ~-21 to -5 dB
-    179, 231, 301, 392, 512                     // 17–21: ~-3 to +6 dB
+    179, 231, 248, 252, 256                     // 17–21: approach unity
 };
 
 int InternetRadio::map_vol_q8_(int step) {
   if (step <= 0) return 0;
-  if (step >= 21) return 512;
+  if (step >= 21) return 256;
   return VOL_Q8[step];
 }
 
@@ -99,20 +97,26 @@ void InternetRadio::setup() {
   this->volume_pref_ = global_preferences->make_preference<int>(fnv1_hash("radio_vol"));
   this->station_pref_ = global_preferences->make_preference<int>(fnv1_hash("radio_sta"));
   this->list_pref_ = global_preferences->make_preference<int>(fnv1_hash("radio_list"));
+  this->play_pref_ = global_preferences->make_preference<int>(fnv1_hash("radio_play"));
 
   int saved_vol = this->default_volume_;
   int saved_sta = 0;
   int saved_list = 0;
+  int saved_play = 0;
   this->volume_pref_.load(&saved_vol);
   this->station_pref_.load(&saved_sta);
   this->list_pref_.load(&saved_list);
+  this->play_pref_.load(&saved_play);
 
   if (saved_vol < 0 || saved_vol > 21) saved_vol = this->default_volume_;
   if (saved_sta < 0 || saved_sta >= NUM_STATIONS) saved_sta = 0;
   if (saved_list < 0 || saved_list > 1) saved_list = 0;
+  if (saved_play < 0 || saved_play > 1) saved_play = 0;
   this->vol_ = saved_vol;
   this->current_station_ = saved_sta;
   this->station_list_ = saved_list;
+  this->resume_playback_ = saved_play != 0;
+  this->auto_play_pending_ = this->resume_playback_;
 
   // Set active station list pointer
   stations_ = saved_list ? stations_test_ : stations_normal_;
@@ -126,9 +130,9 @@ void InternetRadio::setup() {
     this->station_select_->traits.set_options(opts);
   }
 
-  ESP_LOGI(TAG, "Restored station=%d vol=%d list=%s",
+  ESP_LOGI(TAG, "Restored station=%d vol=%d list=%s resume=%s",
            (int)this->current_station_, (int)this->vol_,
-           saved_list ? "TEST" : "NORMAL");
+           saved_list ? "TEST" : "NORMAL", this->resume_playback_ ? "yes" : "no");
 
   // PA pin — keep LOW until stream connects
   if (this->pa_pin_ >= 0) {
@@ -168,11 +172,13 @@ void InternetRadio::loop() {
   // Detect WiFi connect
   if (wifi_now && !this->wifi_connected_) {
     this->wifi_connected_ = true;
-    ESP_LOGI(TAG, "Network connected, starting stream");
     if (this->auto_play_pending_) {
+      ESP_LOGI(TAG, "Network connected, resuming stream");
       this->auto_play_pending_ = false;
       this->connect_station_();
       this->publish_station_select_();
+    } else {
+      ESP_LOGI(TAG, "Network connected, staying idle");
     }
   }
   // Detect WiFi disconnect
@@ -748,6 +754,7 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
       if (ret == ESP_GMF_ERR_OK) {
         this->player_running_ = true;
         this->play_state_ = PS_PLAYING;
+        this->save_resume_playback_(true);
       } else {
         ESP_LOGE(TAG, "Failed to start player: %d", ret);
         this->play_state_ = PS_STOPPED;
@@ -762,6 +769,7 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
       case media_player::MEDIA_PLAYER_COMMAND_PLAY:
         if (this->play_state_ == PS_PAUSED && this->player_) {
           esp_audio_simple_player_resume(this->player_);
+          this->save_resume_playback_(true);
         } else if (this->play_state_ == PS_STOPPED) {
           this->connect_station_();
         }
@@ -771,6 +779,7 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
         if (this->play_state_ == PS_PLAYING && this->player_) {
           esp_audio_simple_player_pause(this->player_);
           this->play_state_ = PS_PAUSED;
+          this->save_resume_playback_(false);
         }
         break;
 
@@ -779,6 +788,7 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
           esp_audio_simple_player_stop(this->player_);
           this->player_running_ = false;
           this->play_state_ = PS_STOPPED;
+          this->save_resume_playback_(false);
           if (this->pa_pin_ >= 0 && !i2s_bridge::I2SBridge::is_active())
             gpio_set_level(static_cast<gpio_num_t>(this->pa_pin_), 0);
         }
@@ -788,8 +798,10 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
         if (this->play_state_ == PS_PLAYING && this->player_) {
           esp_audio_simple_player_pause(this->player_);
           this->play_state_ = PS_PAUSED;
+          this->save_resume_playback_(false);
         } else if (this->play_state_ == PS_PAUSED && this->player_) {
           esp_audio_simple_player_resume(this->player_);
+          this->save_resume_playback_(true);
         } else {
           this->connect_station_();
         }
@@ -806,6 +818,7 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
           esp_audio_simple_player_stop(this->player_);
           this->player_running_ = false;
           this->play_state_ = PS_STOPPED;
+          this->save_resume_playback_(false);
           if (this->pa_pin_ >= 0 && !i2s_bridge::I2SBridge::is_active())
             gpio_set_level(static_cast<gpio_num_t>(this->pa_pin_), 0);
         }
@@ -902,6 +915,7 @@ void InternetRadio::connect_station_() {
       this->player_running_ = true;
       this->play_state_ = PS_PLAYING;
       this->stream_failed_ = false;
+      this->save_resume_playback_(true);
     } else {
       ESP_LOGE(TAG, "Failed to start player: %d", ret);
       this->play_state_ = PS_STOPPED;
@@ -921,6 +935,8 @@ void InternetRadio::connect_station_() {
 
 void InternetRadio::next_station_() {
   int sta = (this->current_station_ + 1) % NUM_STATIONS;
+  ESP_LOGI(TAG, "Station change: source=next %d -> %d (%s)",
+           (int)this->current_station_, sta, stations_[sta].name);
   this->current_station_ = sta;
   int save_sta = sta;
   this->station_pref_.save(&save_sta);
@@ -929,7 +945,13 @@ void InternetRadio::next_station_() {
 }
 
 void InternetRadio::prev_station_() {
-  int sta = (this->current_station_ - 1 + NUM_STATIONS) % NUM_STATIONS;
+  int sta = this->current_station_ > 0 ? this->current_station_ - 1 : 0;
+  if (sta == this->current_station_) {
+    ESP_LOGI(TAG, "Station change: source=previous already at first station");
+    return;
+  }
+  ESP_LOGI(TAG, "Station change: source=previous %d -> %d (%s)",
+           (int)this->current_station_, sta, stations_[sta].name);
   this->current_station_ = sta;
   int save_sta = sta;
   this->station_pref_.save(&save_sta);
@@ -937,13 +959,25 @@ void InternetRadio::prev_station_() {
   this->publish_station_select_();
 }
 
-void InternetRadio::set_station(int idx) {
+void InternetRadio::set_station(int idx, const char *source) {
   if (idx < 0 || idx >= NUM_STATIONS || idx == this->current_station_) return;
+  ESP_LOGI(TAG, "Station change: source=%s %d -> %d (%s)",
+           source ? source : "unknown", (int)this->current_station_,
+           idx, stations_[idx].name);
   this->current_station_ = idx;
   int save_sta = idx;
   this->station_pref_.save(&save_sta);
   this->connect_station_();
   this->publish_station_select_();
+}
+
+void InternetRadio::save_resume_playback_(bool should_resume) {
+  if (this->resume_playback_ == should_resume) return;
+  this->resume_playback_ = should_resume;
+  int save_play = should_resume ? 1 : 0;
+  this->play_pref_.save(&save_play);
+  global_preferences->sync();
+  ESP_LOGD(TAG, "NVS: saved resume=%d", save_play);
 }
 
 void InternetRadio::set_volume_direct(int vol) {

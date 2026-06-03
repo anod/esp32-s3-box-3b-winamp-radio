@@ -84,7 +84,7 @@ void WinampDisplay::handle_touch_() {
     int idx = (ty - STA_Y - 4) / STA_LINE;
     if (this->radio_ && idx >= 0 && idx < num_stations &&
         idx != this->radio_->get_current_station()) {
-      this->radio_->set_station(idx);
+      this->radio_->set_station(idx, "touch");
       ESP_LOGD(TAG_TOUCH, "Station: %s", InternetRadio::get_station_name_at(idx));
     }
     return;

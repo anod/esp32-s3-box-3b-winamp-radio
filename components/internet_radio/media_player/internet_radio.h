@@ -75,12 +75,12 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   int get_vol() const { return this->vol_; }
   static constexpr int get_max_volume() { return 21; }
 
-  // Map UI volume step (0–21) → Q8 fixed-point gain (0–512).
-  // Perceptual dB curve: -42 dB (step 1) to +6 dB (step 21).
+  // Map UI volume step (0–21) → Q8 fixed-point gain (0–256).
+  // Perceptual dB curve capped at unity to avoid clipping hot streams.
   static int map_vol_q8_(int step);
 
   // Station control (for select entity and display)
-  void set_station(int idx);
+  void set_station(int idx, const char *source = "api/select");
   static constexpr int get_num_stations() { return NUM_STATIONS; }
   static const char *get_station_name_at(int idx) { return (idx >= 0 && idx < NUM_STATIONS) ? stations_[idx].name : ""; }
 
@@ -101,6 +101,7 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   static InternetRadio *instance_;
 
   void connect_station_();
+  void save_resume_playback_(bool should_resume);
   void update_ha_state_();
   void mark_vol_dirty_();
   void flush_vol_if_dirty_();
@@ -196,7 +197,8 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
 
   // WiFi / stream lifecycle
   bool wifi_connected_{false};
-  bool auto_play_pending_{true};  // connect to station once WiFi is up
+  bool auto_play_pending_{false};  // resume once WiFi is up if it was playing
+  bool resume_playback_{false};
   volatile bool stream_failed_{false};
   unsigned long last_retry_ms_{0};
   static constexpr unsigned long RETRY_INTERVAL_MS = 5000;
@@ -223,6 +225,7 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   ESPPreferenceObject volume_pref_;
   ESPPreferenceObject station_pref_;
   ESPPreferenceObject list_pref_;
+  ESPPreferenceObject play_pref_;
 
   // Optional HA entity references
   text_sensor::TextSensor *now_playing_sensor_{nullptr};
