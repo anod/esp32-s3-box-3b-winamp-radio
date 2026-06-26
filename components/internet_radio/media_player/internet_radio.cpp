@@ -237,6 +237,7 @@ void InternetRadio::loop() {
       uint32_t bridge_timeouts = this->diag_bridge_timeouts_;
       uint32_t bridge_errors = this->diag_bridge_errors_;
       uint32_t bridge_short_writes = this->diag_bridge_short_writes_;
+      uint32_t i2s0_short = this->diag_i2s0_short_writes_;
 
       this->diag_pcm_callbacks_ = 0;
       this->diag_pcm_bytes_ = 0;
@@ -245,6 +246,7 @@ void InternetRadio::loop() {
       this->diag_bridge_timeouts_ = 0;
       this->diag_bridge_errors_ = 0;
       this->diag_bridge_short_writes_ = 0;
+      this->diag_i2s0_short_writes_ = 0;
 
       if (this->play_state_ == PS_PLAYING || pcm_callbacks > 0 ||
           i2s0_timeouts > 0 || i2s0_errors > 0 || bridge_timeouts > 0 ||
@@ -252,11 +254,13 @@ void InternetRadio::loop() {
         ESP_LOGI(
             TAG,
             "Audio diag: cb=%lu bytes=%lu i2s0_to=%lu i2s0_err=%lu "
-            "bridge_to=%lu bridge_err=%lu bridge_short=%lu sr=%lu bt=%s",
+            "bridge_to=%lu bridge_err=%lu bridge_short=%lu "
+            "i2s0_short=%lu sr=%lu bt=%s",
             (unsigned long) pcm_callbacks, (unsigned long) pcm_bytes,
             (unsigned long) i2s0_timeouts, (unsigned long) i2s0_errors,
             (unsigned long) bridge_timeouts, (unsigned long) bridge_errors,
             (unsigned long) bridge_short_writes,
+            (unsigned long) i2s0_short,
             (unsigned long) this->current_sample_rate_,
             i2s_bridge::I2SBridge::is_active() ? "on" : "off");
       }
@@ -291,6 +295,12 @@ void InternetRadio::loop() {
 void InternetRadio::init_i2s0_() {
   i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
   chan_cfg.auto_clear = true;
+  // The ESP-GMF decoder delivers PCM in bursts: measured callback gaps reach
+  // ~42ms while the default DMA depth (6*240 frames ≈ 33ms @44.1k) is smaller,
+  // so the DMA underflows on jitter spikes and auto_clear injects silence
+  // (audible micro-stutter). Enlarge to 8*512 frames ≈ 93ms to absorb jitter.
+  chan_cfg.dma_desc_num = 8;
+  chan_cfg.dma_frame_num = 512;
   ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &this->i2s_tx_, nullptr));
 
   i2s_std_config_t std_cfg = {
@@ -408,8 +418,14 @@ void InternetRadio::init_http_io_() {
   http_cfg.crt_bundle_attach = esp_crt_bundle_attach;
   http_cfg.event_handle = http_event_cb_;
   http_cfg.user_data = this;
-  http_cfg.io_cfg.buffer_cfg.io_size = 8 * 1024;
-  http_cfg.io_cfg.buffer_cfg.buffer_size = 128 * 1024;
+
+  // Enlarge the upstream network→decoder ring buffer (allocated in PSRAM).
+  // The GMF default (20KB ≈ 1.25s @128kbps) starves the decoder during the
+  // ~200ms delivery stalls seen on high-latency links to distant (e.g. US)
+  // stream servers, causing random audible glitches. 256KB gives more
+  // jitter headroom. Keep io_size at the GMF default (3KB): a larger read
+  // chunk makes the decoder block longer per acquire and worsens gaps.
+  http_cfg.io_cfg.buffer_cfg.buffer_size = 256 * 1024;
 
   esp_gmf_err_t ret = esp_gmf_io_http_init(&http_cfg, &this->http_io_);
   if (ret != ESP_GMF_ERR_OK) {
@@ -417,9 +433,7 @@ void InternetRadio::init_http_io_() {
     return;
   }
   esp_audio_simple_player_register_io(this->player_, this->http_io_);
-  ESP_LOGI(TAG, "HTTP IO registered (HTTPS cert bundle enabled, io=%d ring=%d)",
-           http_cfg.io_cfg.buffer_cfg.io_size,
-           http_cfg.io_cfg.buffer_cfg.buffer_size);
+  ESP_LOGI(TAG, "HTTP IO registered (HTTPS cert bundle enabled)");
 }
 
 // ─── HTTP event callback (Core 0) — ICY metadata extraction ──
@@ -582,6 +596,7 @@ int InternetRadio::pcm_output_cb_(uint8_t *data, int size, void *ctx) {
     self->diag_i2s0_errors_++;
     return -1;
   }
+  if (written < (size_t)size) self->diag_i2s0_short_writes_++;
 
   // 4. Write to I2S bridge (BT speaker) if active
   self->write_bridge_pcm_(data, size);

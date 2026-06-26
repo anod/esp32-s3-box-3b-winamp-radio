@@ -58,6 +58,11 @@ ota:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
+  # Disable modem-sleep: LIGHT power-save (ESPHome default) causes periodic
+  # WiFi wake latency that produces intermittent audio glitches when streaming
+  # from high-RTT (e.g. US) servers. NONE keeps the radio always-on for steady
+  # packet delivery — required for gap-free internet radio.
+  power_save_mode: none
 
 i2c:
   sda: GPIO8

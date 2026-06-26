@@ -193,6 +193,21 @@ ESPHome's `i2c:` component owns I2C bus 0 (GPIO 8/18). LovyanGFX `tft_.init()` t
 - `reconfig_sample_rate_()` updates I2S0 TX for the ES8311 speaker path
 - The S3-side BT bridge keeps I2S1 fixed at 44.1kHz and `write_bridge_pcm_()` linearly resamples non-44.1kHz streams before writing to the WROOM bridge. This is required because the WROOM A2DP callback consumes 44.1kHz frames.
 
+### Audio Glitches from Network Jitter (CRITICAL)
+
+Intermittent audio glitches (occasional clicks/dropouts, NOT continuous stutter) on otherwise-healthy streams are almost always **WiFi delivery jitter**, not the audio pipeline. The decoder→I2S0 metrics (`Audio diag:` callback counts, i2s0 writes) only measure the audio path *after* data arrives — they stay clean while the glitch originates at the WiFi/network layer. Three compounding causes, in order of impact:
+
+1. **WiFi modem-sleep (THE big one)** — ESPHome defaults `wifi: power_save_mode` to `LIGHT` (modem-sleep) on ESP32. The radio periodically powers down between DTIM beacons, adding wake latency that drops packets and produces audible glitches — worst on high-RTT (e.g. US) servers. **Fix: set `power_save_mode: none` in the `wifi:` block.** This is mandatory for gap-free streaming and is the first thing to check for any glitch report.
+2. **Upstream ring buffer too small** — GMF's default network→decoder ring buffer is only ~20KB (`HTTP_STREAM_RINGBUFFER_SIZE`, ~1.25s @128kbps) and is allocated in PSRAM. Distant servers stall delivery for ~200ms, starving the decoder. **Fix: `http_cfg.io_cfg.buffer_cfg.buffer_size = 256 * 1024` in `init_http_io_()`.** This cut measured decoder-output gaps from ~197ms to ~51ms on US stations.
+3. **Do NOT increase `io_size`** — counterintuitively, enlarging `buffer_cfg.io_size` (the per-acquire read chunk) above the GMF default (~3KB) makes gaps *worse* (observed 697ms): a larger chunk makes the decoder block longer waiting to fill each acquire. Leave `io_size` at the default; only grow `buffer_size`.
+
+Symptom-masking note: quiet/ambient streams (e.g. Groove Salad) expose these glitches far more than loud rock (e.g. Rock Antenne), so always test the fix on a quiet stream.
+
+### DMA Buffer Depth (I2S0 to ES8311)
+
+- The ESP-GMF decoder delivers PCM in bursts with callback gaps up to ~42ms. The default I2S0 DMA depth (`6 * 240` frames ≈ 33ms @44.1k) is smaller than that, so jitter spikes underflow the DMA and `auto_clear=true` injects silence (audible micro-stutter).
+- **Fix**: in `init_i2s0_()` set `chan_cfg.dma_desc_num = 8` and `chan_cfg.dma_frame_num = 512` (≈93ms) to absorb burst gaps. The DMA buffer alone is not enough for *network* jitter — pair it with the ring buffer + power-save fixes above.
+
 ### Buffer Underrun Watchdog
 
 - If the HTTP stream stalls (server drop, WiFi hiccup), the ESP-GMF pipeline may stop producing frames

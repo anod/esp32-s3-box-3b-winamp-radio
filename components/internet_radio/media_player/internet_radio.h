@@ -166,6 +166,8 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   volatile uint32_t diag_bridge_timeouts_{0};
   volatile uint32_t diag_bridge_errors_{0};
   volatile uint32_t diag_bridge_short_writes_{0};
+  // Counts I2S0 writes that didn't drain the full buffer (DMA back-pressure).
+  volatile uint32_t diag_i2s0_short_writes_{0};
   unsigned long diag_last_report_ms_{0};
 
   // Pin configuration
