@@ -4,7 +4,7 @@ Internet radio for the [ESP32-S3-BOX-3](https://github.com/espressif/esp-box) bu
 
 ## Features
 
-- 10 pre-configured internet radio stations (electronic, trance, rock, metal, pop, news)
+- 10 pre-configured internet radio stations (electronic, trance, rock, alternative, pop, news)
 - Winamp 2 inspired UI: beveled buttons, grooved title bar, signal bars, state indicators
 - Real-time 16-band FFT spectrum visualizer (segmented gradient bars)
 - Touch screen station selection & volume control

@@ -64,7 +64,7 @@ const Station InternetRadio::stations_normal_[NUM_STATIONS] = {
     {"Psytrance", "http://hirschmilch.de:7000/psytrance.mp3"},
     {"Rock Antenne", "http://stream.rockantenne.de/rockantenne/stream/mp3"},
     {"181 Hard Rock", "http://listen.181fm.com/181-hardrock_128k.mp3"},
-    {"Heavy Metal", "http://stream.rockantenne.de/heavy-metal/stream/mp3"},
+    {"KEXP 90.3 Seattle", "https://kexp-mp3-128.streamguys1.com/kexp128.mp3"},
     {"181 Power Hits", "http://listen.181fm.com/181-power_128k.mp3"},
     {"KROQ", "https://live.amperwave.net/direct/audacy-kroqfmaac-imc"},
     {"BBC World News", "http://stream.live.vc.bbcmedia.co.uk/bbc_world_service"},

@@ -36,9 +36,8 @@ psram:
 
 external_components:
   - source:
-      type: git
-      url: https://github.com/anod/esp32-s3-box-3b-winamp-radio.git
-      ref: main
+      type: local
+      path: ./components
     components:
       - internet_radio
       - winamp_display
@@ -176,7 +175,7 @@ select:
       - "Psytrance"
       - "Rock Antenne"
       - "181 Hard Rock"
-      - "Heavy Metal"
+      - "KEXP 90.3 Seattle"
       - "181 Power Hits"
       - "KROQ"
       - "BBC World News"
