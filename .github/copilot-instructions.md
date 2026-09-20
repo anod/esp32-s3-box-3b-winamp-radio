@@ -155,8 +155,8 @@ These workarounds are in `__init__.py` files and MUST be preserved:
 
 ### Framework & Dependencies
 
-- ESPHome 2026.5.2, ESP-IDF framework (no Arduino)
-- ESP-IDF 5.5.4
+- ESPHome 2026.9.0, ESP-IDF framework via PlatformIO toolchain (no Arduino)
+- ESP-IDF 5.5.5
 - ESP-GMF `esp_audio_simple_player` 0.9.6 (audio pipeline)
 - `esp_codec_dev` 1.5.10 (ES8311 driver)
 - LovyanGFX 1.2.19 (pinned via `cg.add_library`)
@@ -243,6 +243,10 @@ See **ESPHome API Protocol Gap** section above for full details. Key rules:
 - `ota:` must remain a **single** `platform: esphome` entry. Do not add multiple OTA listeners on different ports.
 - The custom components for this repo are loaded from local `./components` during development so ESPHome compiles the checked-out sources instead of refetching `main`.
 - The `ComponentIterator` / `on_media_player()` 2026.5 breaking change does **not** apply here because these components do not implement `ComponentIterator`.
+
+### ESPHome 2026.9 Upgrade Notes
+
+- ESPHome 2026.7 changed the default ESP32 build backend to the native ESP-IDF toolchain. Keep `esp32.toolchain: platformio`; the ESP-GMF HTTP patch and deployed firmware are validated with that backend.
 
 ### WiFi and Network APIs
 

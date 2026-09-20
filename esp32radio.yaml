@@ -4,7 +4,7 @@
 esphome:
   name: esp32radio
   friendly_name: "ESP32 Radio"
-  min_version: 2026.5.2
+  min_version: 2026.9.0
   platformio_options:
     build_flags:
       - -O2
@@ -12,6 +12,9 @@ esphome:
 
 esp32:
   board: esp32s3box
+  # ESPHome 2026.7+ defaults to the native ESP-IDF toolchain. Keep PlatformIO
+  # for the ESP-GMF pre-build patch and the build path validated on this board.
+  toolchain: platformio
   flash_size: 16MB
   framework:
     type: esp-idf

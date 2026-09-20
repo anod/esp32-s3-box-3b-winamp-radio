@@ -22,7 +22,7 @@ Internet radio for the [ESP32-S3-BOX-3](https://github.com/espressif/esp-box) bu
 ### 1. Install ESPHome
 
 ```bash
-pip install "esphome==2026.5.2"
+pip install "esphome==2026.9.0"
 ```
 
 ### 2. Configure Secrets
