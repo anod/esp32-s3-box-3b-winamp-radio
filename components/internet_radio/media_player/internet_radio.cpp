@@ -23,6 +23,7 @@
 // always written before our ON_RESPONSE callback reads them.
 extern "C" volatile int g_icy_metaint = 0;
 extern "C" volatile int g_icy_bitrate = 0;  // kbps from icy-br header
+extern "C" volatile int g_icy_patch_version;
 
 // FFT sample feed (defined in spectrum.cpp)
 extern void feed_fft_samples(const uint8_t *data, int size);
@@ -413,6 +414,11 @@ void InternetRadio::init_player_() {
 }
 
 void InternetRadio::init_http_io_() {
+  if (g_icy_patch_version != 1) {
+    ESP_LOGE(TAG, "GMF HTTP ICY patch is unavailable");
+    return;
+  }
+
   http_io_cfg_t http_cfg = HTTP_STREAM_CFG_DEFAULT();
   http_cfg.dir = ESP_GMF_IO_DIR_READER;
   http_cfg.crt_bundle_attach = esp_crt_bundle_attach;

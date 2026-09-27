@@ -5,13 +5,12 @@ Content-Encoding headers.  This patch adds extraction of icy-metaint
 and icy-br response headers into global volatiles that
 internet_radio.cpp reads on the first ON_RESPONSE callback.
 
-Idempotent: checks for each patch component individually.
-After patching, deletes cached object files to force recompilation.
+Idempotent: checks for and verifies each patch component individually.
 
 Operates in two modes:
-1. PlatformIO pre: script — patches directly if managed_components exist,
-   otherwise injects a cmake hook for first-time builds (e.g. HA addon).
-2. CLI mode — called with file path argument by the cmake hook.
+1. PlatformIO pre: script — injects a CMake hook that runs after project(),
+   once the IDF component manager has restored/fetched managed components.
+2. CLI mode — called with a file path by the CMake hook.
 
 Registered via platformio_options.extra_scripts in __init__.py.
 """
@@ -19,10 +18,10 @@ Registered via platformio_options.extra_scripts in __init__.py.
 import os
 import re
 import sys
-import glob as globmod
 
 MARKER = "// patched: icy header extraction"
 CMAKE_MARKER = "# [icy-patch]"
+PATCH_VERSION = "volatile int g_icy_patch_version = 1;"
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -30,7 +29,7 @@ CMAKE_MARKER = "# [icy-patch]"
 # ─────────────────────────────────────────────────────────────────────
 
 def _apply_patch(http_c):
-    """Apply ICY header extraction patch. Returns True if file was modified."""
+    """Apply and verify the ICY header extraction patch."""
     with open(http_c, "r") as f:
         src = f.read()
 
@@ -48,6 +47,7 @@ def _apply_patch(http_c):
     has_bitrate_decl = "extern volatile int g_icy_bitrate;" in src
     has_metaint_check = 'strcasecmp(evt->header_key, "icy-metaint")' in src
     has_bitrate_check = 'strcasecmp(evt->header_key, "icy-br")' in src
+    has_patch_version = PATCH_VERSION in src
 
     tag_line = 'static const char *TAG = "ESP_GMF_HTTP";'
 
@@ -68,6 +68,18 @@ def _apply_patch(http_c):
             "extern volatile int g_icy_metaint;",
             "extern volatile int g_icy_metaint;\n"
             "extern volatile int g_icy_bitrate;",
+            1,
+        )
+        modified = True
+
+    if not has_patch_version:
+        bitrate_decl = "extern volatile int g_icy_bitrate;"
+        if bitrate_decl not in src:
+            print("  [patch] bitrate declaration not found", file=sys.stderr)
+            return False
+        src = src.replace(
+            bitrate_decl,
+            f"{bitrate_decl}\n{PATCH_VERSION}",
             1,
         )
         modified = True
@@ -133,10 +145,20 @@ def _apply_patch(http_c):
             what.append("icy-br")
         print(f"  [patch] esp_gmf_io_http.c: {'added' if what else 'updated'}"
               f"{' ' + '+'.join(what) if what else ''} extraction")
-        return True
+    else:
+        print("  [patch] esp_gmf_io_http.c: already patched (icy headers)")
 
-    print("  [patch] esp_gmf_io_http.c: already patched (icy headers)")
-    return False
+    required = (
+        "extern volatile int g_icy_metaint;",
+        "extern volatile int g_icy_bitrate;",
+        PATCH_VERSION,
+        'strcasecmp(evt->header_key, "icy-metaint")',
+        'strcasecmp(evt->header_key, "icy-br")',
+    )
+    if not all(item in src for item in required):
+        print("  [patch] ICY patch verification failed", file=sys.stderr)
+        return False
+    return True
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -147,7 +169,8 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         path = sys.argv[1]
         if os.path.isfile(path):
-            _apply_patch(path)
+            if not _apply_patch(path):
+                sys.exit(1)
         else:
             print(f"  [patch] File not found: {path}", file=sys.stderr)
             sys.exit(1)
@@ -161,29 +184,15 @@ if __name__ == "__main__":
 Import("env")  # noqa: F821 — PlatformIO/SCons built-in
 
 
-def _invalidate_obj(env, src_path):
-    """Delete cached object files for a source to force recompilation."""
-    base = os.path.splitext(os.path.basename(src_path))[0]
-    build_dir = env.subst("$BUILD_DIR")
-    pattern = os.path.join(build_dir, "**", base + ".*o*")
-    for obj in globmod.glob(pattern, recursive=True):
-        if obj.endswith(".o") or obj.endswith(".obj"):
-            os.remove(obj)
-            print(f"  [patch] deleted cached {os.path.relpath(obj, build_dir)}")
-
-
 def _inject_cmake_hook(cmake_lists_path, patch_script_path):
-    """Inject cmake snippet into CMakeLists.txt to patch after component fetch.
+    """Inject CMake code that patches after managed-component restoration.
 
-    On fresh builds (e.g. HA addon), managed_components/ doesn't exist when
-    this PlatformIO pre: script runs.  The IDF component manager fetches them
-    during cmake's project() call.  By injecting a snippet *after* project(),
-    the patch runs at the right time — components exist, but haven't been
-    compiled yet.
+    ESP-IDF's component manager may restore managed sources during project(),
+    overwriting any earlier edit. Running after project() guarantees the
+    compiler sees the patched source on both clean and incremental builds.
     """
     if not os.path.isfile(cmake_lists_path):
-        print("  [patch] CMakeLists.txt not found — cannot inject cmake hook")
-        return
+        raise RuntimeError("CMakeLists.txt not found; cannot install ICY patch")
 
     with open(cmake_lists_path, "r") as f:
         content = f.read()
@@ -206,24 +215,26 @@ def _inject_cmake_hook(cmake_lists_path, patch_script_path):
         "    if(_icy_rc EQUAL 0)\n"
         '        message(STATUS "[icy-patch] Patched esp_gmf_io_http.c")\n'
         "    else()\n"
-        "        message(WARNING "
+        "        message(FATAL_ERROR "
         '"[icy-patch] Failed to patch esp_gmf_io_http.c")\n'
         "    endif()\n"
         "else()\n"
-        '    message(STATUS "[icy-patch] esp_gmf_io_http.c not found")\n'
+        '    message(FATAL_ERROR "[icy-patch] esp_gmf_io_http.c not found")\n'
         "endif()\n"
     )
 
     # Insert after the project(...) line
-    content = re.sub(
+    updated = re.sub(
         r"(project\([^)]+\))",
         r"\1" + snippet,
         content,
         count=1,
     )
+    if updated == content:
+        raise RuntimeError("project() not found; cannot install ICY patch")
 
     with open(cmake_lists_path, "w") as f:
-        f.write(content)
+        f.write(updated)
     print("  [patch] Injected cmake hook for deferred ICY patching")
 
 
@@ -248,22 +259,10 @@ def _current_script_path(env):
 
 def _patch(env):
     project_dir = env.subst("$PROJECT_DIR")
-    http_c = os.path.join(
-        project_dir, "managed_components", "espressif__gmf_io",
-        "esp_gmf_io_http.c",
-    )
-
-    if os.path.isfile(http_c):
-        # Rebuild case — managed_components already exist, patch directly
-        if _apply_patch(http_c):
-            _invalidate_obj(env, http_c)
-    else:
-        # Fresh build — inject cmake hook to patch after component fetch
-        print("  [patch] esp_gmf_io_http.c not found"
-              " — injecting cmake hook for deferred patching")
-        cmake_lists = os.path.join(project_dir, "CMakeLists.txt")
-        patch_script = _current_script_path(env)
-        _inject_cmake_hook(cmake_lists, patch_script)
+    cmake_lists = os.path.join(project_dir, "CMakeLists.txt")
+    patch_script = _current_script_path(env)
+    print("  [patch] injecting post-project CMake hook")
+    _inject_cmake_hook(cmake_lists, patch_script)
 
 
 _patch(env)  # noqa: F821
