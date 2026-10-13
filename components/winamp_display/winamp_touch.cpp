@@ -50,18 +50,7 @@ void WinampDisplay::handle_touch_() {
     if (now - this->last_touch_ms_ >= 300) {
       this->last_touch_ms_ = now;
       ESP_LOGD(TAG_TOUCH, "Home button pressed");
-      if (this->radio_) {
-        PlayState ps = this->radio_->get_play_state();
-        if (ps == PS_PLAYING || ps == PS_PAUSED) {
-          auto call = this->radio_->make_call();
-          call.set_command(media_player::MEDIA_PLAYER_COMMAND_STOP);
-          call.perform();
-        } else {
-          auto call = this->radio_->make_call();
-          call.set_command(media_player::MEDIA_PLAYER_COMMAND_PLAY);
-          call.perform();
-        }
-      }
+      this->home_button_cb_.call();
     }
   }
   this->prev_home_btn_ = home_btn;

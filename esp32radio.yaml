@@ -43,6 +43,7 @@ external_components:
       - internet_radio
       - winamp_display
       - i2s_bridge
+      - box3_mic
 
 logger:
   level: DEBUG
@@ -52,6 +53,23 @@ api:
   max_connections: 8
   encryption:
     key: !secret esp32radio_api_key
+  actions:
+    # Debug helpers: preview a voice screen state / stream the screen as base64 logs
+    - action: preview_voice
+      variables:
+        state: int
+        heard: string
+        reply: string
+        mic_peak: int
+      then:
+        - lambda: |-
+            esphome::internet_radio::voice_logic::g_mic_peak = mic_peak;
+            id(display).set_voice_state(state);
+            id(display).set_voice_text(heard.c_str());
+            id(display).set_voice_reply(reply.c_str());
+    - action: screenshot
+      then:
+        - lambda: id(display).dump_screenshot();
 
 ota:
   # 2026.5.x requires OTA to stay a single entry.
@@ -84,6 +102,7 @@ media_player:
     i2s_bclk_pin: 17
     i2s_lrclk_pin: 45
     i2s_dout_pin: 15
+    i2s_din_pin: 16  # ES7210 mic data (shared I2S0, duplex)
     i2s_mclk_pin: 2
     # Power amplifier enable
     pa_pin: 46
@@ -111,6 +130,16 @@ winamp_display:
   bridge_id: bt_speaker
   brightness: 160
   brightness_number_id: screen_brightness
+  # Round touch button below the screen starts the assistant (or stops it if running)
+  on_home_button:
+    - if:
+        condition: voice_assistant.is_running
+        then:
+          - voice_assistant.stop:
+        else:
+          # Show the voice screen immediately; the pipeline takes a moment to start
+          - lambda: id(display).set_voice_state(1);
+          - voice_assistant.start:
 
 # --- Hardware Buttons ---
 
@@ -126,26 +155,97 @@ binary_sensor:
     on_press:
       - lambda: id(display).cycle_brightness();
 
-  - platform: gpio
-    name: "Mute Switch"
-    id: mute_switch
-    pin:
-      number: GPIO1
-      mode: INPUT_PULLDOWN
-    internal: true
-    on_state:
+# --- Voice assistant (button-triggered; mic shares I2S0 with the radio) ---
+
+audio_adc:
+  - platform: es7210
+    id: es7210_adc
+    bits_per_sample: 16bit
+    sample_rate: 16000
+
+microphone:
+  - platform: box3_mic
+    id: box3_microphone
+    radio_id: radio
+    channel: left
+
+voice_assistant:
+  id: va
+  microphone:
+    microphone: box3_microphone
+    gain_factor: 4
+  media_player: radio
+  on_start:
+    - lambda: |-
+        id(display).set_voice_state(1);
+        id(voice_state_text).publish_state("starting");
+  on_listening:
+    - lambda: |-
+        id(display).set_voice_state(2);
+        id(voice_state_text).publish_state("listening");
+        id(voice_heard_text).publish_state("");
+        id(voice_reply_text).publish_state("");
+  on_stt_end:
+    # x = recognized speech
+    - lambda: |-
+        id(display).set_voice_state(3);
+        id(display).set_voice_text(x.c_str());
+        id(voice_state_text).publish_state("thinking");
+        id(voice_heard_text).publish_state(x);
+  on_tts_start:
+    # x = assistant's reply text
+    - lambda: |-
+        id(voice_reply_text).publish_state(x);
+  on_tts_end:
+    - lambda: |-
+        id(display).set_voice_state(4);
+        id(display).set_voice_reply(id(voice_reply_text).state.c_str());
+        id(voice_state_text).publish_state("replying");
+  on_end:
+    # Wait for the TTS reply to finish, then bring the station back
+    - wait_until:
+        condition:
+          not:
+            media_player.is_announcing: radio
+        timeout: 30s
+    # Let a follow-up question (continue_conversation) re-enter the assistant first
+    - delay: 300ms
+    - if:
+        condition:
+          not:
+            voice_assistant.is_running:
+        then:
+          - lambda: |-
+              id(radio).voice_session_end();
+              if (!id(display).voice_is_error()) {
+                id(display).set_voice_state(0);
+                id(voice_state_text).publish_state("idle");
+              }
+  on_error:
+    - lambda: |-
+        id(radio).voice_session_end();
+        id(display).set_voice_state(5);
+        id(display).set_voice_reply(message.c_str());
+        id(voice_state_text).publish_state("error");
+
+interval:
+  # Safety net: never leave the radio stopped if a voice session ended without on_end
+  - interval: 2s
+    then:
       - lambda: |-
-          auto call = id(radio).make_call();
-          if (x) {
-            call.set_command(esphome::media_player::MEDIA_PLAYER_COMMAND_MUTE);
-          } else {
-            call.set_command(esphome::media_player::MEDIA_PLAYER_COMMAND_UNMUTE);
-          }
-          call.perform();
+          if (!id(va).is_running() && id(radio).is_voice_active() && !id(radio).is_announcing())
+            id(radio).voice_session_end();
 
 # --- HA Entities (song title, station picker, controls) ---
 
 button:
+  - platform: template
+    name: "Ask Assistant"
+    icon: "mdi:microphone"
+    on_press:
+      - lambda: id(display).set_voice_state(1);
+      - voice_assistant.start:
+
   - platform: template
     name: "Next Station"
     icon: "mdi:skip-next"
@@ -159,6 +259,19 @@ button:
       - lambda: id(radio).prev_station_();
 
 text_sensor:
+  # Voice assistant status + conversation trace (also visible in HA Assist debug)
+  - platform: template
+    name: "Voice Assistant State"
+    id: voice_state_text
+    icon: "mdi:microphone"
+  - platform: template
+    name: "Voice Heard"
+    id: voice_heard_text
+    icon: "mdi:text-recognition"
+  - platform: template
+    name: "Voice Reply"
+    id: voice_reply_text
+    icon: "mdi:comment-text"
   - platform: template
     name: "Now Playing"
     id: now_playing

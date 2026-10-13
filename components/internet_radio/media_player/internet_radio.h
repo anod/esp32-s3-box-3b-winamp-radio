@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <mutex>
+
 #include "esphome/core/component.h"
 #include "esphome/core/preferences.h"
 #include "esphome/components/media_player/media_player.h"
@@ -58,6 +60,7 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   void set_i2s_bclk_pin(int pin) { this->bclk_pin_ = pin; }
   void set_i2s_lrclk_pin(int pin) { this->lrclk_pin_ = pin; }
   void set_i2s_dout_pin(int pin) { this->dout_pin_ = pin; }
+  void set_i2s_din_pin(int pin) { this->din_pin_ = pin; }
   void set_i2s_mclk_pin(int pin) { this->mclk_pin_ = pin; }
   void set_pa_pin(int pin) { this->pa_pin_ = pin; }
   void set_default_volume(int vol) { this->default_volume_ = vol; }
@@ -94,6 +97,19 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   void next_station_();
   void prev_station_();
 
+  // ── Voice assistant support ──
+  // Mic capture shares I2S0 with the speaker path, so the radio is stopped while
+  // a voice session is active and the station is restored when it ends.
+  i2s_chan_handle_t get_i2s_rx() const { return this->i2s_rx_; }
+  // Core 1: stop radio (async), re-clock I2S0 to 16 kHz, enable RX.
+  // Returns 1 ok, 0 failed, -1 still stopping the player (call again)
+  int voice_capture_begin();
+  void voice_capture_end();     // Core 1: disable RX
+  void voice_session_end();     // Core 1: restore the radio once announcements finish
+  bool is_voice_active() const { return this->voice_active_; }
+  void voice_mic_requested(bool on) { this->mic_requested_ = on; }
+  bool is_announcing() const { return this->announcing_; }
+
  protected:
   void control(const media_player::MediaPlayerCall &call) override;
 
@@ -114,6 +130,8 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   void init_player_();
   void init_http_io_();
   void reconfig_sample_rate_(uint32_t new_rate);
+  void play_uri_(const char *url);
+  void restore_after_voice_();
   void write_bridge_pcm_(const uint8_t *data, int size);
 
   // ESP-GMF callbacks (static, Core 0)
@@ -147,8 +165,28 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   // 256 = unity (100%), 0 = silent. Updated by set_volume_direct/control.
   volatile int sw_vol_gain_{256};
 
-  // I2S0 TX channel (to ES8311 codec)
+  // I2S0 TX channel (to ES8311 codec) and RX channel (from ES7210 mic).
+  // Created together so the pair forms full duplex; RX stays disabled unless
+  // a voice capture is running.
   i2s_chan_handle_t i2s_tx_{nullptr};
+  i2s_chan_handle_t i2s_rx_{nullptr};
+  volatile bool rx_enabled_{false};
+
+  // Voice session state (Core 1 only, except announcing_ which Core 0 clears)
+  bool voice_active_{false};         // a voice session owns the audio path
+  bool voice_resume_radio_{false};   // radio was playing before the session
+  void wait_stop_done_();            // block until the async voice stop finished (<= 5 s)
+  volatile int stop_state_{0};       // async player stop for voice: 0 idle, 1 busy, 2 done
+  bool voice_end_pending_{false};    // session over, waiting for TTS to finish
+  volatile bool announcing_{false};  // TTS announcement is playing
+  volatile bool mic_requested_{false};   // box3_mic wants/has the capture path
+  volatile bool announce_pending_{false};  // an enqueued announcement URL is waiting
+  char pending_announce_[300]{};
+  char pending_media_[300]{};          // play_media URL received during a voice session
+  bool has_pending_media_{false};
+  unsigned long voice_end_ms_{0};      // when voice_session_end() was requested
+  unsigned int announce_stall_count_{0};
+  std::mutex i2s_cfg_mutex_;  // serializes I2S0 re-clock and RX enable/disable (Core 0 vs Core 1)
   uint32_t current_sample_rate_{44100};
   uint32_t bridge_resample_pos_q16_{1u << 16};
   int16_t bridge_resample_prev_l_{0};
@@ -174,6 +212,7 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   int bclk_pin_{17};
   int lrclk_pin_{45};
   int dout_pin_{15};
+  int din_pin_{16};
   int mclk_pin_{2};
   int pa_pin_{46};
   int default_volume_{15};
@@ -229,6 +268,7 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
 
   // State change detection for HA publishing
   PlayState last_published_state_{PS_STOPPED};
+  bool last_published_announcing_{false};
   char last_published_title_[128]{};
 
   // NVS

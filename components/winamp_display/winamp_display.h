@@ -7,6 +7,9 @@
 #pragma once
 
 #include "esphome/core/component.h"
+#include "esphome/core/automation.h"
+#include "text_layout.h"
+#include "voice_font.h"
 #include "esphome/core/hal.h"
 #include "esphome/core/preferences.h"
 #include "esphome/components/i2c/i2c.h"
@@ -45,6 +48,43 @@ class WinampDisplay final : public Component, public i2c::I2CDevice {
   // Config setters (called by codegen)
   void set_radio(internet_radio::InternetRadio *radio) { this->radio_ = radio; }
   void set_bridge(i2s_bridge::I2SBridge *bridge) { this->bridge_ = bridge; }
+  // Voice assistant status (called from YAML on Core 1, same thread as drawing)
+  enum VoiceState : uint8_t {
+    VOICE_IDLE = 0, VOICE_LOADING, VOICE_LISTENING, VOICE_THINKING, VOICE_REPLYING, VOICE_ERROR
+  };
+  void set_voice_state(int state) {
+    this->voice_hold_ = false;
+    if (state == VOICE_IDLE && this->voice_reply_[0] && this->voice_state_ != VOICE_ERROR &&
+        this->voice_state_ != VOICE_IDLE) {
+      // Keep the reply on screen long enough to read it
+      size_t n = strlen(this->voice_reply_);
+      unsigned long ms = VOICE_HOLD_MIN_MS + n * VOICE_HOLD_MS_PER_BYTE;
+      this->voice_hold_ms_ = ms > VOICE_HOLD_MAX_MS ? VOICE_HOLD_MAX_MS : ms;
+      this->voice_hold_ = true;
+      this->voice_state_ms_ = millis();
+      return;
+    }
+    this->voice_state_ = (uint8_t) state;
+    this->voice_state_ms_ = millis();
+    if (state == VOICE_LISTENING || state == VOICE_LOADING) {
+      this->voice_heard_[0] = '\0';
+      this->voice_reply_[0] = '\0';
+      this->voice_layout_dirty_ = true;
+    }
+    this->last_frame_ms_ = 0;  // switch views on the next loop() pass
+  }
+  // Debug: freeze the frame and stream the canvas (RGB565) as base64 log lines.
+  void dump_screenshot() { this->shot_pos_ = 0; this->shot_active_ = true; }
+  bool voice_is_error() const { return this->voice_state_ == VOICE_ERROR; }
+  // Recognized speech (shown dim, top) and the assistant's reply / error text.
+  void set_voice_text(const char *text) {
+    strlcpy(this->voice_heard_, text, sizeof(this->voice_heard_));
+    this->voice_layout_dirty_ = true;
+  }
+  void set_voice_reply(const char *text) {
+    strlcpy(this->voice_reply_, text, sizeof(this->voice_reply_));
+    this->voice_layout_dirty_ = true;
+  }
   void set_brightness_number(number::Number *n) { this->brightness_number_ = n; }
   void set_brightness(int brightness) {
     if (brightness < 1) brightness = 1;
@@ -63,6 +103,9 @@ class WinampDisplay final : public Component, public i2c::I2CDevice {
     this->publish_brightness_();
   }
   void cycle_brightness();
+  void add_on_home_button_callback(std::function<void()> &&cb) {
+    this->home_button_cb_.add(std::move(cb));
+  }
   int get_brightness() const { return this->brightness_; }
 
  protected:
@@ -93,17 +136,59 @@ class WinampDisplay final : public Component, public i2c::I2CDevice {
   LGFX tft_;
   LGFX_Sprite canvas_{&tft_};
   LGFX_Sprite ticker_sprite_{&tft_};
+  uint16_t voice_bg_{0};
+  uint16_t voice_col_{0};
 
   // Config
   int brightness_{160};
   int brightness_idx_{2};
   bool screen_on_{true};
   bool prev_home_btn_{false};
+  CallbackManager<void()> home_button_cb_;
+
+  uint8_t voice_state_{0};
+  unsigned long voice_state_ms_{0};
+  char voice_heard_[256]{};
+  char voice_reply_[1024]{};  // UTF-8: Cyrillic/Hebrew are 2 bytes per char
+  static constexpr int VOICE_HEARD_LINES = 2;
+  static constexpr int VOICE_REPLY_LINES = 8;
+  static constexpr int VOICE_LINE_BYTES = 128;
+  static constexpr int VOICE_TEXT_Y = 96;
+  // Pre-wrapped, bidi-reordered lines (rebuilt only when the text changes)
+  char voice_vis_[VOICE_HEARD_LINES + VOICE_REPLY_LINES][VOICE_LINE_BYTES]{};
+  uint8_t voice_heard_n_{0};
+  uint8_t voice_reply_n_{0};
+  bool voice_heard_rtl_{false};
+  bool voice_reply_rtl_{false};
+  bool voice_layout_dirty_{false};
+  bool shot_active_{false};
+  uint32_t shot_pos_{0};
+  void pump_screenshot_();
+  // VLW fonts live in flash; only the small glyph tables are heap-allocated, once.
+  lgfx::PointerWrapper voice_font_data_;
+  lgfx::VLWfont voice_font_;
+  lgfx::PointerWrapper voice_font_small_data_;
+  lgfx::VLWfont voice_font_small_;
+  bool voice_font_ok_{false};
+  bool voice_small_ok_{false};
+  bool voice_small_{false};  // long text: the small font is in use
+  int voice_level_{0};       // smoothed mic meter 0..100
+  void draw_voice_view_();
+  void layout_voice_text_();
+  void layout_voice_lines_(const char *str, int max_lines, uint8_t first_slot, uint8_t *count, bool *rtl,
+                           bool *truncated);
+  static constexpr unsigned long VOICE_ERROR_SHOW_MS = 4000;
+  static constexpr unsigned long VOICE_HOLD_MIN_MS = 4000;
+  static constexpr unsigned long VOICE_HOLD_MS_PER_BYTE = 40;
+  static constexpr unsigned long VOICE_HOLD_MAX_MS = 15000;
+  bool voice_hold_{false};
+  unsigned long voice_hold_ms_{0};
 
   // Brightness presets and auto-dim
   static constexpr uint8_t BRIGHTNESS_LEVELS[] = {20, 80, 160, 255};
   static constexpr int NUM_BRIGHTNESS = 4;
   static constexpr uint8_t DIM_BRIGHTNESS = 10;
+  bool dimmed_{false};
   int prev_play_state_{-1};  // track for auto-dim
 
   // NVS persistence (debounced)
@@ -175,6 +260,13 @@ class WinampDisplay final : public Component, public i2c::I2CDevice {
   unsigned long last_frame_ms_{0};
   unsigned long last_ticker_ms_{0};
   unsigned long last_touch_ms_loop_{0};
+};
+
+class HomeButtonTrigger final : public Trigger<> {
+ public:
+  explicit HomeButtonTrigger(WinampDisplay *parent) {
+    parent->add_on_home_button_callback([this]() { this->trigger(); });
+  }
 };
 
 }  // namespace winamp_display

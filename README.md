@@ -8,7 +8,7 @@ Internet radio for the [ESP32-S3-BOX-3](https://github.com/espressif/esp-box) bu
 - Winamp 2 inspired UI: beveled buttons, grooved title bar, signal bars, state indicators
 - Real-time 16-band FFT spectrum visualizer (segmented gradient bars)
 - Touch screen station selection & volume control
-- Hardware buttons: Boot (cycle brightness), Mute switch (GPIO 1), Home (stop/play)
+- Hardware buttons: Boot (cycle brightness), Mute switch (GPIO 1, hardware mic mute), Home (voice assistant)
 - Auto-dim screen when stopped, restore on play
 - Scrolling song title ticker with ID3/ICY metadata (Artist - Title)
 - WiFi signal strength & bitrate display
@@ -87,9 +87,9 @@ In WSL, grant serial access once: `sudo usermod -aG dialout $USER` (re-login req
 | Touch VOL −/+      | Decrease/increase volume       |
 | Touch MUTE         | Toggle mute                    |
 | Touch BT SPEAKER   | Toggle Bluetooth/local speaker (green indicator = active) |
-| Home button (red ●)| Stop/play toggle               |
+| Home button (red ●)| Start/stop voice assistant     |
 | Boot button (GPIO0)| Cycle screen brightness        |
-| Mute switch (GPIO1)| Toggle mute                    |
+| Mute switch (GPIO1)| Hardware mic mute              |
 
 ## Hardware — ESP32-S3-BOX-3
 

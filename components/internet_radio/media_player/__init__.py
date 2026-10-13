@@ -17,6 +17,7 @@ InternetRadio = internet_radio_ns.class_(
 CONF_I2S_BCLK_PIN = "i2s_bclk_pin"
 CONF_I2S_LRCLK_PIN = "i2s_lrclk_pin"
 CONF_I2S_DOUT_PIN = "i2s_dout_pin"
+CONF_I2S_DIN_PIN = "i2s_din_pin"
 CONF_I2S_MCLK_PIN = "i2s_mclk_pin"
 CONF_PA_PIN = "pa_pin"
 CONF_DEFAULT_VOLUME = "default_volume"
@@ -30,6 +31,7 @@ CONFIG_SCHEMA = (
             cv.Required(CONF_I2S_BCLK_PIN): cv.int_range(min=0, max=48),
             cv.Required(CONF_I2S_LRCLK_PIN): cv.int_range(min=0, max=48),
             cv.Required(CONF_I2S_DOUT_PIN): cv.int_range(min=0, max=48),
+            cv.Optional(CONF_I2S_DIN_PIN, default=16): cv.int_range(min=0, max=48),
             cv.Optional(CONF_I2S_MCLK_PIN, default=2): cv.int_range(min=0, max=48),
             cv.Optional(CONF_PA_PIN, default=-1): cv.int_range(min=-1, max=48),
             cv.Optional(CONF_DEFAULT_VOLUME, default=15): cv.int_range(min=0, max=21),
@@ -66,6 +68,7 @@ async def to_code(config):
     cg.add(var.set_i2s_bclk_pin(config[CONF_I2S_BCLK_PIN]))
     cg.add(var.set_i2s_lrclk_pin(config[CONF_I2S_LRCLK_PIN]))
     cg.add(var.set_i2s_dout_pin(config[CONF_I2S_DOUT_PIN]))
+    cg.add(var.set_i2s_din_pin(config[CONF_I2S_DIN_PIN]))
     cg.add(var.set_i2s_mclk_pin(config[CONF_I2S_MCLK_PIN]))
     cg.add(var.set_pa_pin(config[CONF_PA_PIN]))
     cg.add(var.set_default_volume(config[CONF_DEFAULT_VOLUME]))

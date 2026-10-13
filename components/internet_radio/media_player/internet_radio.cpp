@@ -4,11 +4,13 @@
 // ============================================================
 
 #include "internet_radio.h"
+#include "voice_logic.h"
 #include "esphome/core/log.h"
 #include "esphome/components/network/util.h"
 #include "../../i2s_bridge/switch/i2s_bridge.h"
 #include "driver/gpio.h"
 #include "esp_system.h"
+#include "esp_heap_caps.h"
 #include "driver/i2c_master.h"
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
@@ -46,6 +48,10 @@ static const uint16_t VOL_Q8[22] = {
     22,  28,  37,  48,  62,  81, 106, 138,      // 9–16: ~-21 to -5 dB
     179, 231, 248, 252, 256                     // 17–21: approach unity
 };
+
+// Voice assistant replies use a fixed medium level (step 14 ≈ -10 dB),
+// independent of the radio volume.
+static constexpr int VOICE_REPLY_GAIN_Q8 = 81;
 
 int InternetRadio::map_vol_q8_(int step) {
   if (step <= 0) return 0;
@@ -173,7 +179,7 @@ void InternetRadio::loop() {
   // Detect WiFi connect
   if (wifi_now && !this->wifi_connected_) {
     this->wifi_connected_ = true;
-    if (this->auto_play_pending_) {
+    if (this->auto_play_pending_ && !this->voice_active_) {
       ESP_LOGI(TAG, "Network connected, resuming stream");
       this->auto_play_pending_ = false;
       this->connect_station_();
@@ -189,7 +195,7 @@ void InternetRadio::loop() {
   }
 
   // Retry on stream failure (with debounce to avoid rapid-fire retries)
-  if (this->stream_failed_ && this->wifi_connected_) {
+  if (this->stream_failed_ && this->wifi_connected_ && !this->voice_active_ && !this->announcing_) {
     unsigned long now = millis();
     if (now - this->last_retry_ms_ >= RETRY_INTERVAL_MS) {
       this->last_retry_ms_ = now;
@@ -211,7 +217,7 @@ void InternetRadio::loop() {
       this->watchdog_last_check_ms_ = now;
       uint32_t fc = g_audio_frame_count;
       if (this->play_state_ == PS_PLAYING && this->wifi_connected_ &&
-          !this->stream_failed_) {
+          !this->stream_failed_ && !this->announcing_ && !this->voice_active_) {
         if (fc == this->watchdog_last_frame_count_ &&
             this->watchdog_stall_count_++ >= (UNDERRUN_TIMEOUT_MS / 1000)) {
           ESP_LOGW(TAG, "No audio output for %lus, reconnecting",
@@ -221,6 +227,19 @@ void InternetRadio::loop() {
         }
       } else {
         this->watchdog_stall_count_ = 0;
+      }
+      // Stalled announcement (reply stream never finished): give up so the radio can resume
+      if (this->announcing_ && fc == this->watchdog_last_frame_count_ &&
+          ++this->announce_stall_count_ >= 10) {
+        ESP_LOGW(TAG, "Announcement stalled, aborting");
+        if (this->player_ && this->player_running_) esp_audio_simple_player_stop(this->player_);
+        this->player_running_ = false;
+        this->play_state_ = PS_STOPPED;
+        this->announcing_ = false;
+        this->announce_pending_ = false;
+        this->announce_stall_count_ = 0;
+      } else if (!this->announcing_ || fc != this->watchdog_last_frame_count_) {
+        this->announce_stall_count_ = 0;
       }
       this->watchdog_last_frame_count_ = fc;
     }
@@ -272,7 +291,7 @@ void InternetRadio::loop() {
   // Skip if BT bridge is active — bridge mutes internal speaker
   if (this->pa_pending_ && (millis() - this->pa_pending_ms_ >= 200)) {
     this->pa_pending_ = false;
-    if (!i2s_bridge::I2SBridge::is_active()) {
+    if (!i2s_bridge::I2SBridge::is_active() || this->announcing_) {
       gpio_set_level(static_cast<gpio_num_t>(this->pa_pin_), 1);
     }
   }
@@ -283,8 +302,24 @@ void InternetRadio::loop() {
   // Publish state changes to HA (reads from stable title buffer)
   const char *title = this->title_bufs_[this->title_read_idx_.load(std::memory_order_acquire)];
   bool title_changed = strcmp(title, this->last_published_title_) != 0;
-  if (this->play_state_ != this->last_published_state_ || title_changed) {
+  bool announcing_now = this->announcing_;
+  if (this->play_state_ != this->last_published_state_ || title_changed ||
+      announcing_now != this->last_published_announcing_) {
     this->update_ha_state_();
+  }
+  if (this->announce_pending_ && this->player_ &&
+      (!this->player_running_ || this->play_state_ == PS_STOPPED)) {
+    // Previous announcement finished; start the queued one (announcing_ stayed set)
+    this->announce_pending_ = false;
+    this->announcing_ = true;  // may have been cleared by a racing FINISHED on Core 0
+    this->play_uri_(this->pending_announce_);
+    if (this->play_state_ != PS_PLAYING) this->announcing_ = false;
+  }
+  // Require the end request to be ~500ms old so a follow-up question can start its mic first
+  if (millis() - this->voice_end_ms_ >= 500 && voice_logic::should_restore(this->voice_end_pending_, this->announcing_,
+                                  this->announce_pending_, this->mic_requested_,
+                                  this->rx_enabled_)) {
+    this->restore_after_voice_();
   }
   if (title_changed && this->now_playing_sensor_) {
     this->now_playing_sensor_->publish_state(title);
@@ -302,7 +337,7 @@ void InternetRadio::init_i2s0_() {
   // (audible micro-stutter). Enlarge to 8*512 frames ≈ 93ms to absorb jitter.
   chan_cfg.dma_desc_num = 8;
   chan_cfg.dma_frame_num = 512;
-  ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &this->i2s_tx_, nullptr));
+  ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &this->i2s_tx_, &this->i2s_rx_));
 
   i2s_std_config_t std_cfg = {
       .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(44100),
@@ -313,17 +348,20 @@ void InternetRadio::init_i2s0_() {
           .bclk = (gpio_num_t)this->bclk_pin_,
           .ws = (gpio_num_t)this->lrclk_pin_,
           .dout = (gpio_num_t)this->dout_pin_,
-          .din = I2S_GPIO_UNUSED,
+          .din = (gpio_num_t)this->din_pin_,
           .invert_flags = {.mclk_inv = false, .bclk_inv = false, .ws_inv = false},
       },
   };
   std_cfg.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
+  // Full duplex requires identical TX/RX configs (including gpio_cfg)
   ESP_ERROR_CHECK(i2s_channel_init_std_mode(this->i2s_tx_, &std_cfg));
+  ESP_ERROR_CHECK(i2s_channel_init_std_mode(this->i2s_rx_, &std_cfg));
   ESP_ERROR_CHECK(i2s_channel_enable(this->i2s_tx_));
 
   this->current_sample_rate_ = 44100;
-  ESP_LOGI(TAG, "I2S0: BCLK=%d LRCK=%d DOUT=%d MCLK=%d (44100Hz)",
-           this->bclk_pin_, this->lrclk_pin_, this->dout_pin_, this->mclk_pin_);
+  ESP_LOGI(TAG, "I2S0: BCLK=%d LRCK=%d DOUT=%d DIN=%d MCLK=%d (44100Hz duplex), free internal heap=%u",
+           this->bclk_pin_, this->lrclk_pin_, this->dout_pin_, this->din_pin_, this->mclk_pin_,
+           (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 }
 
 void InternetRadio::init_es8311_() {
@@ -581,16 +619,9 @@ int InternetRadio::pcm_output_cb_(uint8_t *data, int size, void *ctx) {
   feed_fft_samples(data, size);
 
   // 2. Software volume: scale 16-bit PCM samples using Q8 fixed-point gain
-  int gain = self->sw_vol_gain_;
+  int gain = self->announcing_ ? VOICE_REPLY_GAIN_Q8 : self->sw_vol_gain_;
   if (gain != 256) {
-    int16_t *samples = reinterpret_cast<int16_t *>(data);
-    int num_samples = size / 2;
-    for (int i = 0; i < num_samples; i++) {
-      int32_t s = (int32_t)samples[i] * gain >> 8;
-      if (s > 32767) s = 32767;
-      if (s < -32768) s = -32768;
-      samples[i] = (int16_t)s;
-    }
+    voice_logic::apply_gain_q8(reinterpret_cast<int16_t *>(data), size / 2, gain);
   }
 
   // 3. Write to ES8311 speaker (bounded timeout to avoid hanging stop/reconnect)
@@ -604,8 +635,8 @@ int InternetRadio::pcm_output_cb_(uint8_t *data, int size, void *ctx) {
   }
   if (written < (size_t)size) self->diag_i2s0_short_writes_++;
 
-  // 4. Write to I2S bridge (BT speaker) if active
-  self->write_bridge_pcm_(data, size);
+  // 4. Write to I2S bridge (BT speaker) if active — voice replies stay on the internal speaker
+  if (!self->announcing_) self->write_bridge_pcm_(data, size);
 
   // 5. Watchdog frame count
   g_audio_frame_count++;
@@ -742,7 +773,7 @@ int InternetRadio::player_event_cb_(esp_asp_event_pkt_t *pkt, void *ctx) {
         self->player_running_ = true;
         // Enable PA (deferred) — only if BT bridge isn't active
         if (self->pa_pin_ >= 0 && !self->pa_pending_ &&
-            !i2s_bridge::I2SBridge::is_active()) {
+            (!i2s_bridge::I2SBridge::is_active() || self->announcing_)) {
           self->pa_pending_ = true;
           self->pa_pending_ms_ = millis();
         }
@@ -756,6 +787,14 @@ int InternetRadio::player_event_cb_(esp_asp_event_pkt_t *pkt, void *ctx) {
         break;
       case ESP_ASP_STATE_FINISHED:
       case ESP_ASP_STATE_ERROR:
+        if (self->announcing_) {
+          // TTS reply done: not a stream failure; Core 1 restores the radio.
+          // Keep announcing_ set if another announcement is queued.
+          if (!self->announce_pending_) self->announcing_ = false;
+          self->play_state_ = PS_STOPPED;
+          self->player_running_ = false;
+          break;
+        }
         ESP_LOGW(TAG, "Stream %s", state == ESP_ASP_STATE_ERROR ? "error" : "finished");
         self->stream_failed_ = true;
         self->play_state_ = PS_STOPPED;
@@ -773,12 +812,24 @@ void InternetRadio::reconfig_sample_rate_(uint32_t new_rate) {
   ESP_LOGI(TAG, "Reconfiguring I2S0: %lu → %lu Hz",
            (unsigned long)this->current_sample_rate_, (unsigned long)new_rate);
 
+  std::lock_guard<std::mutex> lock(this->i2s_cfg_mutex_);
+  bool rx_was_on = this->rx_enabled_;
+  if (rx_was_on) i2s_channel_disable(this->i2s_rx_);
   i2s_channel_disable(this->i2s_tx_);
 
   i2s_std_clk_config_t clk = I2S_STD_CLK_DEFAULT_CONFIG(new_rate);
   clk.mclk_multiple = I2S_MCLK_MULTIPLE_256;
   ESP_ERROR_CHECK(i2s_channel_reconfig_std_clock(this->i2s_tx_, &clk));
+  esp_err_t rx_err = i2s_channel_reconfig_std_clock(this->i2s_rx_, &clk);
+  if (rx_err != ESP_OK) ESP_LOGE(TAG, "RX clock reconfig failed: %s", esp_err_to_name(rx_err));
   ESP_ERROR_CHECK(i2s_channel_enable(this->i2s_tx_));
+  if (rx_was_on) {
+    rx_err = i2s_channel_enable(this->i2s_rx_);
+    if (rx_err != ESP_OK) {
+      ESP_LOGE(TAG, "RX re-enable failed: %s", esp_err_to_name(rx_err));
+      this->rx_enabled_ = false;
+    }
+  }
 
   // Update ES8311 sample rate
   if (this->codec_if_) {
@@ -791,6 +842,124 @@ void InternetRadio::reconfig_sample_rate_(uint32_t new_rate) {
   }
 
   this->current_sample_rate_ = new_rate;
+}
+
+void InternetRadio::wait_stop_done_() {
+  for (int i = 0; i < 100 && this->stop_state_ != 0; i++) vTaskDelay(pdMS_TO_TICKS(50));
+}
+
+void InternetRadio::play_uri_(const char *url) {
+  if (!this->player_) return;
+  this->wait_stop_done_();
+  if (this->player_running_) {
+    esp_audio_simple_player_stop(this->player_);
+    this->player_running_ = false;
+  }
+  // Add codec hint for extensionless URLs
+  char uri_buf[300];
+  const char *ext = strrchr(url, '.');
+  bool needs_hint = !ext || strchr(ext, '/');
+  if (needs_hint) {
+    snprintf(uri_buf, sizeof(uri_buf), "%s#.aac", url);
+  } else {
+    strlcpy(uri_buf, url, sizeof(uri_buf));
+  }
+  esp_gmf_err_t ret = esp_audio_simple_player_run(this->player_, uri_buf, nullptr);
+  if (ret == ESP_GMF_ERR_OK) {
+    this->player_running_ = true;
+    this->play_state_ = PS_PLAYING;
+  } else {
+    ESP_LOGE(TAG, "Failed to start player: %d", ret);
+    this->play_state_ = PS_STOPPED;
+  }
+}
+
+// ─── Voice assistant support ──────────────────────────────
+
+int InternetRadio::voice_capture_begin() {
+  if (this->i2s_rx_ == nullptr) return 0;
+  // A new capture cancels any pending restore (follow-up questions)
+  this->voice_end_pending_ = false;
+  this->announce_pending_ = false;
+  if (!this->voice_active_) {
+    this->voice_active_ = true;
+    this->voice_resume_radio_ = this->play_state_ == PS_PLAYING || this->stream_failed_;
+    this->stream_failed_ = false;
+  }
+  // Always stop the player (radio or leftover announcement): the mic needs the clock
+  // Stopping the player can block ~3 s (HTTP teardown). Pause it (silences I2S0 TX at
+  // once) and finish the stop on a worker task while the mic is already listening.
+  if (this->player_ && this->player_running_ && this->stop_state_ == 0) {
+    esp_audio_simple_player_pause(this->player_);
+    this->stop_state_ = 1;
+    auto fn = [](void *arg) {
+      auto *self = static_cast<InternetRadio *>(arg);
+      esp_audio_simple_player_stop(self->player_);
+      self->stop_state_ = 0;
+      self->player_running_ = false;
+      self->play_state_ = PS_STOPPED;
+      vTaskDelete(nullptr);
+    };
+    if (xTaskCreate(fn, "va_stop", 4096, this, 5, nullptr) != pdPASS) {
+      esp_audio_simple_player_stop(this->player_);
+      this->stop_state_ = 0;
+    }
+    this->play_state_ = PS_STOPPED;
+  }
+  this->announcing_ = false;
+  if (this->current_sample_rate_ != 16000) this->reconfig_sample_rate_(16000);
+  {
+    std::lock_guard<std::mutex> lock(this->i2s_cfg_mutex_);
+    if (!this->rx_enabled_) {
+      esp_err_t err = i2s_channel_enable(this->i2s_rx_);
+      if (err != ESP_OK) {
+        ESP_LOGE(TAG, "RX enable failed: %s", esp_err_to_name(err));
+        this->voice_end_pending_ = true;
+        return 0;
+      }
+      this->rx_enabled_ = true;
+    }
+  }
+  ESP_LOGI(TAG, "Voice capture started (radio resume=%d)", (int) this->voice_resume_radio_);
+  return 1;
+}
+
+void InternetRadio::voice_capture_end() {
+  std::lock_guard<std::mutex> lock(this->i2s_cfg_mutex_);
+  if (this->rx_enabled_) {
+    i2s_channel_disable(this->i2s_rx_);
+    this->rx_enabled_ = false;
+  }
+}
+
+void InternetRadio::voice_session_end() {
+  // Restore happens in loop() once any TTS announcement has finished
+  this->voice_end_ms_ = millis();
+  this->voice_end_pending_ = true;
+}
+
+void InternetRadio::restore_after_voice_() {
+  this->voice_end_pending_ = false;
+  if (!this->voice_active_) return;
+  this->voice_active_ = false;
+  this->voice_capture_end();
+  // Internal speaker was used for the reply; mute it again if BT owns the output
+  if (this->pa_pin_ >= 0 && i2s_bridge::I2SBridge::is_active()) {
+    this->pa_pending_ = false;
+    gpio_set_level(static_cast<gpio_num_t>(this->pa_pin_), 0);
+  }
+  if (this->has_pending_media_) {
+    this->has_pending_media_ = false;
+    this->voice_resume_radio_ = false;
+    ESP_LOGI(TAG, "Voice session over, playing deferred URL");
+    this->play_uri_(this->pending_media_);
+    if (this->play_state_ == PS_PLAYING) this->save_resume_playback_(true);
+  } else if (this->voice_resume_radio_) {
+    this->voice_resume_radio_ = false;
+    ESP_LOGI(TAG, "Voice session over, resuming station");
+    this->connect_station_();
+  }
+  this->watchdog_stall_count_ = 0;
 }
 
 // ─── MediaPlayer interface ────────────────────────────────
@@ -812,6 +981,11 @@ media_player::MediaPlayerTraits InternetRadio::get_traits() {
       media_player::MediaPlayerEntityFeature::BROWSE_MEDIA |
       media_player::MediaPlayerEntityFeature::TURN_ON |
       media_player::MediaPlayerEntityFeature::TURN_OFF);
+  // Announcements (voice assistant TTS) are decoded by the same pipeline;
+  // the PCM path is stereo-only, so request stereo MP3 at 44.1 kHz. sample_bytes
+  // stays 0: HA's ffmpeg fails (HTTP 500) when mp3 is combined with 16-bit samples.
+  traits.get_supported_formats().push_back(
+      {"mp3", 44100, 2, media_player::MediaPlayerFormatPurpose::PURPOSE_ANNOUNCEMENT, 0});
   return traits;
 }
 
@@ -830,36 +1004,45 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
 
   if (call.get_media_url().has_value()) {
     const std::string &url = *call.get_media_url();
-    ESP_LOGI(TAG, "Play URL: %s", url.c_str());
-    this->id3_artist_[0] = '\0';
-    this->id3_title_[0] = '\0';
-    int write_idx = 1 - this->title_read_idx_.load(std::memory_order_relaxed);
-    strlcpy(this->title_bufs_[write_idx], "Connecting...", 128);
-    this->title_read_idx_.store(write_idx, std::memory_order_release);
-    // Play the URL directly via ESP-GMF
-    if (this->player_) {
-      if (this->player_running_) {
-        esp_audio_simple_player_stop(this->player_);
-        this->player_running_ = false;
+    bool announce = call.get_announcement().value_or(false);
+    ESP_LOGI(TAG, "Play URL%s: %s", announce ? " (announcement)" : "", url.c_str());
+    bool enqueue = call.get_command().has_value() &&
+                   *call.get_command() == media_player::MEDIA_PLAYER_COMMAND_ENQUEUE;
+    if (announce && enqueue && this->announcing_) {
+      // Queue behind the current announcement (e.g. preannounce chime, then TTS)
+      strlcpy(this->pending_announce_, url.c_str(), sizeof(this->pending_announce_));
+      this->announce_pending_ = true;
+    } else if (announce) {
+      // TTS reply: leave the station title and resume flag untouched
+      if (!this->voice_active_) {
+        // Standalone announcement: behave as a mini session so the radio resumes after
+        this->voice_active_ = true;
+        this->voice_resume_radio_ = this->play_state_ == PS_PLAYING;
+        this->voice_end_ms_ = millis();
+        this->voice_end_pending_ = true;
       }
-      // Add codec hint for extensionless URLs
-      char uri_buf[300];
-      const char *ext = strrchr(url.c_str(), '.');
-      bool needs_hint = !ext || strchr(ext, '/');
-      if (needs_hint) {
-        snprintf(uri_buf, sizeof(uri_buf), "%s#.aac", url.c_str());
-      } else {
-        strlcpy(uri_buf, url.c_str(), sizeof(uri_buf));
+      this->announce_pending_ = false;
+      this->announcing_ = true;
+      this->play_uri_(url.c_str());
+      if (this->play_state_ != PS_PLAYING) this->announcing_ = false;
+    } else {
+      if (this->voice_active_) {
+        // Mic/TTS owns I2S0; play the requested URL once the session ends
+        strlcpy(this->pending_media_, url.c_str(), sizeof(this->pending_media_));
+        this->has_pending_media_ = true;
+        this->voice_resume_radio_ = false;
+        this->update_ha_state_();
+        return;
       }
-      esp_gmf_err_t ret = esp_audio_simple_player_run(this->player_, uri_buf, nullptr);
-      if (ret == ESP_GMF_ERR_OK) {
-        this->player_running_ = true;
-        this->play_state_ = PS_PLAYING;
-        this->save_resume_playback_(true);
-      } else {
-        ESP_LOGE(TAG, "Failed to start player: %d", ret);
-        this->play_state_ = PS_STOPPED;
-      }
+      this->announcing_ = false;
+      this->announce_pending_ = false;
+      this->id3_artist_[0] = '\0';
+      this->id3_title_[0] = '\0';
+      int write_idx = 1 - this->title_read_idx_.load(std::memory_order_relaxed);
+      strlcpy(this->title_bufs_[write_idx], "Connecting...", 128);
+      this->title_read_idx_.store(write_idx, std::memory_order_release);
+      this->play_uri_(url.c_str());
+      if (this->play_state_ == PS_PLAYING) this->save_resume_playback_(true);
     }
     this->watchdog_stall_count_ = 0;
   }
@@ -877,6 +1060,7 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
         break;
 
       case media_player::MEDIA_PLAYER_COMMAND_PAUSE:
+        if (this->voice_active_) { this->voice_resume_radio_ = false; this->has_pending_media_ = false; }
         if (this->play_state_ == PS_PLAYING && this->player_) {
           esp_audio_simple_player_pause(this->player_);
           this->play_state_ = PS_PAUSED;
@@ -885,11 +1069,14 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
         break;
 
       case media_player::MEDIA_PLAYER_COMMAND_STOP:
+        if (this->voice_active_) { this->voice_resume_radio_ = false; this->has_pending_media_ = false; }
         if (this->play_state_ != PS_STOPPED && this->player_) {
           esp_audio_simple_player_stop(this->player_);
           this->player_running_ = false;
           this->play_state_ = PS_STOPPED;
-          this->save_resume_playback_(false);
+          if (!this->announcing_) this->save_resume_playback_(false);
+          this->announcing_ = false;
+          this->announce_pending_ = false;
           if (this->pa_pin_ >= 0 && !i2s_bridge::I2SBridge::is_active())
             gpio_set_level(static_cast<gpio_num_t>(this->pa_pin_), 0);
         }
@@ -915,11 +1102,14 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
         break;
 
       case media_player::MEDIA_PLAYER_COMMAND_TURN_OFF:
+        if (this->voice_active_) { this->voice_resume_radio_ = false; this->has_pending_media_ = false; }
         if (this->play_state_ != PS_STOPPED && this->player_) {
           esp_audio_simple_player_stop(this->player_);
           this->player_running_ = false;
           this->play_state_ = PS_STOPPED;
-          this->save_resume_playback_(false);
+          if (!this->announcing_) this->save_resume_playback_(false);
+          this->announcing_ = false;
+          this->announce_pending_ = false;
           if (this->pa_pin_ >= 0 && !i2s_bridge::I2SBridge::is_active())
             gpio_set_level(static_cast<gpio_num_t>(this->pa_pin_), 0);
         }
@@ -982,6 +1172,11 @@ void InternetRadio::control(const media_player::MediaPlayerCall &call) {
 // ─── Internal helpers ─────────────────────────────────────
 
 void InternetRadio::connect_station_() {
+  if (this->voice_active_) {
+    // Mic/TTS owns the audio path; remember the intent and resume afterwards
+    this->voice_resume_radio_ = true;
+    return;
+  }
   const char *url = stations_[this->current_station_].url;
   ESP_LOGI(TAG, "Station: [%d] %s → %s",
            (int)this->current_station_,
@@ -1007,6 +1202,7 @@ void InternetRadio::connect_station_() {
 
   // Start playback via ESP-GMF pipeline
   if (this->player_) {
+    this->wait_stop_done_();
     if (this->player_running_) {
       esp_audio_simple_player_stop(this->player_);
       this->player_running_ = false;
@@ -1109,7 +1305,10 @@ void InternetRadio::toggle_station_list() {
 }
 
 void InternetRadio::update_ha_state_() {
-  switch (this->play_state_) {
+  this->last_published_announcing_ = this->announcing_;
+  if (this->announcing_) {
+    this->state = media_player::MEDIA_PLAYER_STATE_ANNOUNCING;
+  } else switch (this->play_state_) {
     case PS_PLAYING:
       this->state = media_player::MEDIA_PLAYER_STATE_PLAYING;
       break;

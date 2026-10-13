@@ -1,5 +1,6 @@
 #include "winamp_display.h"
 #include "esphome/components/internet_radio/media_player/internet_radio.h"
+#include "esphome/components/internet_radio/media_player/voice_logic.h"
 #include "esphome/components/i2s_bridge/switch/i2s_bridge.h"
 #include "esphome/components/wifi/wifi_component.h"
 #include "esphome/components/network/util.h"
@@ -15,6 +16,225 @@ static const char *const TAG = "winamp_display";
 static const uint8_t grad_r[] = {0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF};
 static const uint8_t grad_g[] = {0x40, 0x80, 0xFF, 0xFF, 0x80, 0x00};
 static const uint8_t grad_b[] = {0x40, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+// RGB565 status colors: loading, listening, thinking, replying, error
+static constexpr uint16_t VOICE_COL_LOADING = 0xFE60;    // yellow
+static constexpr uint16_t VOICE_COL_LISTENING = 0x1DDE;  // cyan  (0x18BCF2)
+static constexpr uint16_t VOICE_COL_THINKING = 0x8A3F;   // purple (0x8E47FF)
+static constexpr uint16_t VOICE_COL_REPLYING = 0x2E69;   // green (0x2CCB4A)
+static constexpr uint16_t VOICE_COL_ERROR = 0xF800;      // red
+
+static uint16_t voice_color(uint8_t state) {
+  switch (state) {
+    case WinampDisplay::VOICE_LISTENING: return VOICE_COL_LISTENING;
+    case WinampDisplay::VOICE_THINKING: return VOICE_COL_THINKING;
+    case WinampDisplay::VOICE_REPLYING: return VOICE_COL_REPLYING;
+    case WinampDisplay::VOICE_ERROR: return VOICE_COL_ERROR;
+    default: return VOICE_COL_LOADING;
+  }
+}
+
+static const char *voice_label(uint8_t state) {
+  switch (state) {
+    case WinampDisplay::VOICE_LISTENING: return "LISTENING";
+    case WinampDisplay::VOICE_THINKING: return "THINKING";
+    case WinampDisplay::VOICE_REPLYING: return "REPLYING";
+    case WinampDisplay::VOICE_ERROR: return "ERROR";
+    default: return "STARTING";
+  }
+}
+
+// Scale an RGB565 color's channels by num/8.
+static uint16_t scale565(uint16_t c, int num) {
+  int r = ((c >> 11) & 0x1F) * num / 8;
+  int g = ((c >> 5) & 0x3F) * num / 8;
+  int b = (c & 0x1F) * num / 8;
+  return (uint16_t) ((r << 11) | (g << 5) | b);
+}
+
+// Triangle wave 0..period
+static int tri(uint32_t t, int period) {
+  int m = (int) (t % (uint32_t) (2 * period));
+  return m > period ? 2 * period - m : m;
+}
+
+// State icon: microphone with a per-state animation. k scales the whole icon.
+static void draw_voice_icon(LGFX_Sprite &c, int cx, int cy, float k, uint8_t state, uint16_t col, uint16_t bg,
+                            uint32_t t) {
+  auto S = [k](int v) { return (int) (v * k + (v >= 0 ? 0.5f : -0.5f)); };
+  const int phase = (int) ((t / 60) % 16);
+
+  // Capsule + cradle + stem + base
+  c.fillRoundRect(cx - S(14), cy - S(36), S(28), S(46), S(14), col);
+  c.fillRoundRect(cx - S(26), cy - S(14), S(52), S(42), S(22), col);
+  c.fillRoundRect(cx - S(22), cy - S(18), S(44), S(42), S(18), bg);
+  c.fillRoundRect(cx - S(14), cy - S(36), S(28), S(46), S(14), col);
+  c.fillRect(cx - S(2), cy + S(28), S(4), S(8), col);
+  c.fillRoundRect(cx - S(14), cy + S(36), S(28), S(4), S(2), col);
+
+  switch (state) {
+    case WinampDisplay::VOICE_LISTENING:
+      for (int i = 0; i < 2; i++) {
+        int kk = (phase + i * 8) % 16;
+        c.drawCircle(cx, cy, S(30 + kk), scale565(col, 8 - kk / 2));
+      }
+      break;
+    case WinampDisplay::VOICE_LOADING:
+    case WinampDisplay::VOICE_THINKING: {
+      static const int8_t dx[8] = {0, 40, 56, 40, 0, -40, -56, -40};
+      static const int8_t dy[8] = {-42, -30, 0, 30, 42, 30, 0, -30};
+      for (int i = 0; i < 8; i++) {
+        int age = ((phase / 2) - i + 8) % 8;
+        c.fillCircle(cx + S(dx[i]), cy + S(dy[i]), S(5 - age / 3), scale565(col, 8 - age));
+      }
+      break;
+    }
+    case WinampDisplay::VOICE_REPLYING:
+      for (int i = 0; i < 4; i++) {
+        int h = S(8 + tri(t / 45 + i * 7, 20) * 30 / 20);
+        int off = 52 + i * 12;
+        c.fillRoundRect(cx - S(off) - S(4), cy - h / 2, S(6), h, S(2), col);
+        c.fillRoundRect(cx + S(off) - S(2), cy - h / 2, S(6), h, S(2), col);
+      }
+      break;
+    case WinampDisplay::VOICE_ERROR:
+      // Thin slash with a dark outline, kept inside the icon
+      for (int i = -2; i <= 2; i += 4) c.drawLine(cx - S(24) + i, cy - S(34), cx + S(24) + i, cy + S(34), bg);
+      c.drawLine(cx - S(24), cy - S(34), cx + S(24), cy + S(34), TFT_WHITE);
+      c.drawLine(cx - S(24) + 1, cy - S(34), cx + S(24) + 1, cy + S(34), TFT_WHITE);
+      break;
+    default:
+      break;
+  }
+}
+
+void WinampDisplay::layout_voice_lines_(const char *str, int max_lines, uint8_t first_slot, uint8_t *count,
+                                        bool *rtl, bool *truncated) {
+  auto &c = this->canvas_;
+  constexpr int MAX_W = 304;
+  auto measure = [&c](const char *p, size_t n) -> int {
+    char tmp[text::MAX_LINE_CPS * 3 + 4];
+    if (n > sizeof(tmp) - 1) n = sizeof(tmp) - 1;
+    memcpy(tmp, p, n);
+    tmp[n] = '\0';
+    return c.textWidth(tmp);
+  };
+  size_t len = strlen(str);
+  *rtl = text::is_rtl_paragraph(str, len);
+  text::Span spans[VOICE_REPLY_LINES];
+  size_t n = text::wrap(str, len, MAX_W, measure, spans, max_lines, truncated);
+  for (size_t i = 0; i < n; i++) {
+    char line[text::MAX_LINE_CPS * 3 + 4];
+    size_t l = spans[i].len;
+    if (l > sizeof(line) - 8) l = sizeof(line) - 8;
+    memcpy(line, str + spans[i].off, l);
+    line[l] = '\0';
+    if (*truncated && i == n - 1) {
+      strcat(line, "...");
+      l += 3;
+      while (l > 3 && measure(line, l) > MAX_W) {
+        // drop the last codepoint before the ellipsis
+        size_t cut = l - 3;
+        do { cut--; } while (cut > 0 && ((uint8_t) line[cut] & 0xC0) == 0x80);
+        memmove(line + cut, line + l - 3, 4);
+        l = cut + 3;
+      }
+    }
+    text::reorder(line, l, *rtl, this->voice_vis_[first_slot + i], VOICE_LINE_BYTES);
+  }
+  *count = (uint8_t) n;
+}
+
+// Wrap with the large font; if anything is cut off, redo it with the small font.
+void WinampDisplay::layout_voice_text_() {
+  auto &c = this->canvas_;
+  for (int pass = 0; pass < 2; pass++) {
+    const bool small = pass == 1;
+    c.setFont(small ? (const lgfx::IFont *) &this->voice_font_small_ : (const lgfx::IFont *) &this->voice_font_);
+    const int lh = c.fontHeight();
+    bool t_heard = false, t_reply = false;
+    this->layout_voice_lines_(this->voice_heard_, VOICE_HEARD_LINES, 0, &this->voice_heard_n_,
+                              &this->voice_heard_rtl_, &t_heard);
+    int free_px = CANVAS_H - 4 - (VOICE_TEXT_Y + this->voice_heard_n_ * lh + (this->voice_heard_n_ ? 4 : 0));
+    int reply_lines = free_px / lh;
+    if (reply_lines > VOICE_REPLY_LINES) reply_lines = VOICE_REPLY_LINES;
+    if (reply_lines < 1) reply_lines = 1;
+    this->layout_voice_lines_(this->voice_reply_, reply_lines, VOICE_HEARD_LINES, &this->voice_reply_n_,
+                              &this->voice_reply_rtl_, &t_reply);
+    this->voice_small_ = small;
+    if (!(t_heard || t_reply) || !this->voice_small_ok_) break;
+  }
+  this->voice_layout_dirty_ = false;
+}
+
+// Full-screen assistant view. With no text yet the icon fills the screen (plus state
+// label and, while listening, a live mic meter); once text arrives it shrinks to the top.
+// Draws into the same canvas as the radio view, so switching is just the next frame.
+void WinampDisplay::draw_voice_view_() {
+  auto &c = this->canvas_;
+  const uint32_t t = millis();
+  const uint8_t state = this->voice_state_;
+  uint16_t col = voice_color(state);
+  const char *label = voice_label(state);
+  const bool has_text = this->voice_heard_[0] || this->voice_reply_[0];
+
+  // Live mic meter. Exactly-zero samples mean the hardware mic switch is muting the mics.
+  bool muted = false;
+  if (state == VOICE_LISTENING) {
+    const int peak = internet_radio::voice_logic::g_mic_peak;
+    const int target = internet_radio::voice_logic::level_pct(peak);
+    // Fast attack, slow release
+    if (target >= this->voice_level_) this->voice_level_ = target;
+    else this->voice_level_ = (this->voice_level_ - 8 > target) ? this->voice_level_ - 8 : target;
+    muted = (t - this->voice_state_ms_ > 2500) && peak == 0;
+    if (muted) { col = VOICE_COL_ERROR; label = "MIC MUTED?"; }
+  }
+
+  const uint16_t bg = scale565(col, 1);
+  c.fillSprite(bg);
+  c.drawRect(0, 0, 320, CANVAS_H, col);
+  this->voice_bg_ = bg;
+  this->voice_col_ = col;
+
+  if (!has_text) {
+    draw_voice_icon(c, 160, 76, 1.5f, state, col, bg, t);
+    c.setFont(&this->voice_font_);
+    c.setTextDatum(lgfx::middle_center);
+    c.setTextColor(col, bg);
+    c.drawString(label, 160, 160);
+    c.setTextDatum(lgfx::top_left);
+    if (state == VOICE_LISTENING) {
+      constexpr int BX = 60, BY = 184, BW = 200, BH = 12;
+      c.drawRect(BX, BY, BW, BH, scale565(col, 5));
+      const int fill = (BW - 4) * this->voice_level_ / 100;
+      if (fill > 0) c.fillRect(BX + 2, BY + 2, fill, BH - 4, col);
+    }
+    return;
+  }
+
+  draw_voice_icon(c, 160, 50, 1.0f, state, col, bg, t);
+  if (this->voice_layout_dirty_) this->layout_voice_text_();
+  c.setFont(&this->voice_font_small_);
+  c.setTextColor(col, bg);
+  c.drawString(label, 8, 6);
+
+  c.setFont(this->voice_small_ ? (const lgfx::IFont *) &this->voice_font_small_
+                               : (const lgfx::IFont *) &this->voice_font_);
+  const int lh = c.fontHeight();
+  int y = VOICE_TEXT_Y;
+  auto draw_lines = [&](int first, int n, bool rtl, uint16_t color) {
+    c.setTextColor(color, bg);
+    c.setTextDatum(rtl ? lgfx::top_right : lgfx::top_left);
+    for (int i = 0; i < n; i++) {
+      c.drawString(this->voice_vis_[first + i], rtl ? 312 : 8, y);
+      y += lh;
+    }
+  };
+  draw_lines(0, this->voice_heard_n_, this->voice_heard_rtl_, lgfx::color565(170, 170, 190));
+  if (this->voice_heard_n_ && this->voice_reply_n_) y += 4;
+  draw_lines(VOICE_HEARD_LINES, this->voice_reply_n_, this->voice_reply_rtl_, TFT_WHITE);
+  c.setTextDatum(lgfx::top_left);
+}
 
 static uint16_t gradient_color_565(float t) {
   if (t <= 0.0f) t = 0.0f;
@@ -72,6 +292,13 @@ void WinampDisplay::setup() {
   void *buf = this->canvas_.createSprite(320, CANVAS_H);
   ESP_LOGI(TAG, "Canvas sprite: %p (%dx%d = %d bytes)", buf, 320, CANVAS_H, 320 * CANVAS_H * 2);
 
+  this->voice_font_data_.set(VOICE_FONT_VLW, sizeof(VOICE_FONT_VLW));
+  this->voice_font_ok_ = this->voice_font_.loadFont(&this->voice_font_data_);
+  this->voice_font_small_data_.set(VOICE_FONT_SMALL_VLW, sizeof(VOICE_FONT_SMALL_VLW));
+  this->voice_small_ok_ = this->voice_font_small_.loadFont(&this->voice_font_small_data_);
+  ESP_LOGI(TAG, "Voice fonts: large=%s small=%s", this->voice_font_ok_ ? "ok" : "FAILED",
+           this->voice_small_ok_ ? "ok" : "FAILED");
+
   this->ticker_sprite_.setColorDepth(16);
   this->ticker_sprite_.createSprite(TICKER_SPRITE_W, TICKER_SPRITE_H);
 
@@ -104,6 +331,23 @@ void WinampDisplay::setup() {
 // constexpr static member definition
 constexpr uint8_t WinampDisplay::BRIGHTNESS_LEVELS[];
 
+void WinampDisplay::pump_screenshot_() {
+  const uint8_t *buf = (const uint8_t *) this->canvas_.getBuffer();
+  const uint32_t total = 320 * CANVAS_H * 2;
+  if (!buf) { this->shot_active_ = false; return; }
+  constexpr uint32_t CHUNK = 192;
+  for (int i = 0; i < 6 && this->shot_pos_ < total; i++) {
+    uint32_t n = total - this->shot_pos_ < CHUNK ? total - this->shot_pos_ : CHUNK;
+    std::string b64 = base64_encode(buf + this->shot_pos_, n);
+    ESP_LOGI(TAG, "SHOT %u %s", (unsigned) this->shot_pos_, b64.c_str());
+    this->shot_pos_ += n;
+  }
+  if (this->shot_pos_ >= total) {
+    ESP_LOGI(TAG, "SHOT END");
+    this->shot_active_ = false;
+  }
+}
+
 void WinampDisplay::cycle_brightness() {
   this->brightness_idx_ = (this->brightness_idx_ + 1) % NUM_BRIGHTNESS;
   this->set_brightness(BRIGHTNESS_LEVELS[this->brightness_idx_]);
@@ -123,6 +367,11 @@ void WinampDisplay::loop() {
     this->handle_touch_();
   }
 
+  if (this->shot_active_) {
+    this->pump_screenshot_();
+    return;
+  }
+
   // Main frame + visualizer (~15fps = 66ms) — single canvas push
   if (now - this->last_frame_ms_ >= 66) {
     this->last_frame_ms_ = now;
@@ -135,16 +384,15 @@ void WinampDisplay::loop() {
     this->scroll_ticker_();
   }
 
-  // Auto-dim: dim when stopped, restore when playing
+  // Auto-dim when stopped, but never during a voice session (the radio is
+  // paused for it, which would otherwise dim the screen).
   if (this->radio_) {
     int ps = static_cast<int>(this->radio_->get_play_state());
-    if (ps != this->prev_play_state_) {
-      if (this->screen_on_) {
-        if (ps == static_cast<int>(internet_radio::PS_STOPPED))
-          this->tft_.setBrightness(DIM_BRIGHTNESS);
-        else if (this->prev_play_state_ == static_cast<int>(internet_radio::PS_STOPPED))
-          this->tft_.setBrightness(this->brightness_);
-      }
+    bool dim = ps == static_cast<int>(internet_radio::PS_STOPPED) && this->voice_state_ == VOICE_IDLE;
+    if (ps != this->prev_play_state_ || dim != this->dimmed_) {
+      if (this->screen_on_ && dim != this->dimmed_)
+        this->tft_.setBrightness(dim ? DIM_BRIGHTNESS : this->brightness_);
+      this->dimmed_ = dim;
       this->prev_play_state_ = ps;
     }
   }
@@ -185,6 +433,21 @@ void WinampDisplay::draw_wa_btn_(int bx, int by, int bw, int bh, bool pressed,
 void WinampDisplay::draw_frame_() {
   auto &c = this->canvas_;
   if (!c.getBuffer()) return;
+
+  if (this->voice_state_ == VOICE_ERROR &&
+      millis() - this->voice_state_ms_ > VOICE_ERROR_SHOW_MS) {
+    this->voice_state_ = VOICE_IDLE;
+  }
+  if (this->voice_hold_ && millis() - this->voice_state_ms_ > this->voice_hold_ms_) {
+    this->voice_hold_ = false;
+    this->voice_state_ = VOICE_IDLE;
+  }
+  if (this->voice_state_ != VOICE_IDLE && this->voice_font_ok_) {
+    this->draw_voice_view_();
+    c.pushSprite(0, 0);
+    return;
+  }
+
   c.fillSprite(this->c_bg_);
 
   // Read state from InternetRadio
@@ -434,6 +697,14 @@ void WinampDisplay::scroll_ticker_() {
   }
 
   auto &ts = this->ticker_sprite_;
+  if (this->voice_state_ != VOICE_IDLE) {
+    // The voice view owns the whole screen: continue its background and frame
+    // over the strip below the canvas.
+    const int h = 240 - TICKER_BOX_Y;
+    this->tft_.fillRect(0, TICKER_BOX_Y, 320, h, this->voice_bg_);
+    this->tft_.drawRect(0, TICKER_BOX_Y - 1, 320, h + 1, this->voice_col_);
+    return;
+  }
   ts.fillSprite(this->c_panel_);
   ts.drawRect(0, 0, TICKER_SPRITE_W, TICKER_SPRITE_H, this->c_border_);
   ts.setTextColor(TFT_GREEN, this->c_panel_);
