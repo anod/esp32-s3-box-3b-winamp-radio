@@ -174,10 +174,12 @@ audio_adc:
 microphone:
   - platform: box3_mic
     id: box3_microphone
+    radio_id: radio
     channel: left
   # Second instance for wake word: listens while the radio plays (resampled to 16 kHz)
   - platform: box3_mic
     id: box3_wake_microphone
+    radio_id: radio
     channel: left
     wake_mode: true
 
