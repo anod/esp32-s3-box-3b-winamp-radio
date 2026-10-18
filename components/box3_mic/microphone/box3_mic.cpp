@@ -21,14 +21,14 @@ void Box3Mic::setup() {
 }
 
 void Box3Mic::dump_config() {
-  ESP_LOGCONFIG(TAG, "BOX-3 Microphone:\n  Channel: %s\n  Format: 16 kHz mono 16-bit",
-                this->use_right_ ? "right" : "left");
+  ESP_LOGCONFIG(TAG, "BOX-3 Microphone:\n  Channel: %s\n  Mode: %s\n  Format: 16 kHz mono 16-bit",
+                this->use_right_ ? "right" : "left", this->wake_mode_ ? "wake" : "session");
 }
 
 void Box3Mic::start() {
   if (this->is_failed()) return;
   this->want_run_ = true;
-  if (this->radio_ != nullptr) this->radio_->voice_mic_requested(true);
+  if (this->radio_ != nullptr && !this->wake_mode_) this->radio_->voice_mic_requested(true);
   if (this->state_ == microphone::STATE_STOPPED) {
     this->state_ = microphone::STATE_STARTING;
   }
@@ -45,12 +45,29 @@ void Box3Mic::loop() {
   switch (this->state_) {
     case microphone::STATE_STARTING: {
       if (!this->want_run_) {
-        if (this->radio_ != nullptr) this->radio_->voice_mic_requested(false);
+        if (this->radio_ != nullptr && !this->wake_mode_) this->radio_->voice_mic_requested(false);
         this->state_ = microphone::STATE_STOPPED;
         break;
       }
-      int begin = this->radio_ == nullptr ? 0 : this->radio_->voice_capture_begin();
-      if (begin < 0) break;  // player still stopping; retry next loop
+      if (rx_busy_) {
+        // The other instance is still reading RX (wake task winding down)
+        if (this->wait_start_ms_ == 0) this->wait_start_ms_ = millis();
+        if (millis() - this->wait_start_ms_ < 3000) break;
+        ESP_LOGE(TAG, "Capture path busy");
+      }
+      int begin = 0;
+      if (!rx_busy_ && this->radio_ != nullptr)
+        begin = this->wake_mode_ ? this->radio_->wake_capture_begin()
+                                 : this->radio_->voice_capture_begin();
+      if (begin < 0) break;  // player still stopping / session active; retry next loop
+      this->wait_start_ms_ = 0;
+      if (begin == 0 && this->wake_mode_) {
+        // Keep retrying: the wake word component believes the mic is running
+        if (!this->start_err_logged_) ESP_LOGE(TAG, "Failed to start wake capture, retrying");
+        this->start_err_logged_ = true;
+        break;
+      }
+      this->start_err_logged_ = false;
       if (begin == 0) {
         ESP_LOGE(TAG, "Failed to start I2S capture");
         if (this->radio_ != nullptr) {
@@ -65,10 +82,12 @@ void Box3Mic::loop() {
       xStreamBufferReset(this->stream_);
       this->task_stop_ = false;
       this->task_done_ = false;
+      rx_busy_ = true;
       this->dropped_bytes_ = 0;
-      if (xTaskCreatePinnedToCore(capture_task_, "box3_mic", 4096, this, 5, &this->task_, 1) != pdPASS) {
+      if (xTaskCreatePinnedToCore(capture_task_, "box3_mic", 8192, this, 5, &this->task_, 1) != pdPASS) {
         ESP_LOGE(TAG, "Failed to create capture task");
         this->task_done_ = true;
+        rx_busy_ = false;
         this->radio_->voice_capture_end();
         this->radio_->voice_mic_requested(false);
         this->radio_->voice_session_end();
@@ -111,12 +130,15 @@ void Box3Mic::loop() {
 
 void Box3Mic::finish_stop_() {
   this->task_ = nullptr;
+  rx_busy_ = false;
   if (this->radio_ != nullptr) this->radio_->voice_capture_end();
   if (this->dropped_bytes_ > 0) {
     ESP_LOGW(TAG, "Dropped %lu bytes of mic audio", (unsigned long) this->dropped_bytes_);
   }
-  if (!this->want_run_ && this->radio_ != nullptr) this->radio_->voice_mic_requested(false);
-  internet_radio::voice_logic::g_mic_peak = 0;
+  if (!this->wake_mode_) {
+    if (!this->want_run_ && this->radio_ != nullptr) this->radio_->voice_mic_requested(false);
+    internet_radio::voice_logic::g_mic_peak = 0;
+  }
   ESP_LOGD(TAG, "Capture stopped");
   this->state_ = this->want_run_ ? microphone::STATE_STARTING : microphone::STATE_STOPPED;
 }
@@ -132,6 +154,9 @@ void Box3Mic::run_capture_() {
   i2s_chan_handle_t rx = this->radio_->get_i2s_rx();
   int16_t frames[FRAMES_PER_READ * 2];
   int16_t mono[FRAMES_PER_READ];
+  // Out rate is 16 kHz; the bus runs at the radio's rate, so decimate (ratio 1 in a session)
+  int16_t out[FRAMES_PER_READ];
+  internet_radio::voice_logic::Decimator dec(16000);
   const int pick = this->use_right_ ? 1 : 0;
   int peak[2] = {0, 0};
   int blocks = 0;
@@ -148,16 +173,21 @@ void Box3Mic::run_capture_() {
     internet_radio::voice_logic::extract_mono(frames, n, pick, mono, block_peak);
     for (int ch = 0; ch < 2; ch++)
       if (block_peak[ch] > peak[ch]) peak[ch] = block_peak[ch];
-    int env = internet_radio::voice_logic::g_mic_peak;
-    env -= env / 8;
-    internet_radio::voice_logic::g_mic_peak = block_peak[pick] > env ? block_peak[pick] : env;
-    size_t bytes = n * sizeof(int16_t);
-    size_t sent = xStreamBufferSend(this->stream_, mono, bytes, 0);
-    if (sent < bytes) this->dropped_bytes_ += bytes - sent;
+    if (!this->wake_mode_) {
+      int env = internet_radio::voice_logic::g_mic_peak;
+      env -= env / 8;
+      internet_radio::voice_logic::g_mic_peak = block_peak[pick] > env ? block_peak[pick] : env;
+    }
+    size_t out_n = dec.process(this->radio_->get_current_sample_rate(), mono, n, out);
+    size_t bytes = out_n * sizeof(int16_t);
+    if (bytes > 0) {
+      size_t sent = xStreamBufferSend(this->stream_, out, bytes, 0);
+      if (sent < bytes) this->dropped_bytes_ += bytes - sent;
+    }
 
     // ~1 s of capture between level reports, to pick the right mic channel
     if (++blocks >= 62) {
-      ESP_LOGD(TAG, "Mic peak: left=%d right=%d", peak[0], peak[1]);
+      if (!this->wake_mode_) ESP_LOGD(TAG, "Mic peak: left=%d right=%d", peak[0], peak[1]);
       peak[0] = peak[1] = 0;
       blocks = 0;
     }

@@ -29,6 +29,9 @@ class Box3Mic final : public microphone::Microphone, public Component {
 
   void set_radio(internet_radio::InternetRadio *radio) { this->radio_ = radio; }
   void set_use_right_channel(bool right) { this->use_right_ = right; }
+  // Wake mode: keep listening while the radio plays (resampled to 16 kHz), never
+  // stops the radio. Session mode (default) takes over the audio path for the assistant.
+  void set_wake_mode(bool wake) { this->wake_mode_ = wake; }
 
  protected:
   static void capture_task_(void *param);
@@ -37,6 +40,11 @@ class Box3Mic final : public microphone::Microphone, public Component {
 
   internet_radio::InternetRadio *radio_{nullptr};
   bool use_right_{false};
+  bool wake_mode_{false};
+  bool start_err_logged_{false};
+  uint32_t wait_start_ms_{0};
+  // Only one instance may read the I2S0 RX channel at a time
+  static inline volatile bool rx_busy_{false};
 
   StreamBufferHandle_t stream_{nullptr};
   TaskHandle_t task_{nullptr};

@@ -106,6 +106,11 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   int voice_capture_begin();
   void voice_capture_end();     // Core 1: disable RX
   void voice_session_end();     // Core 1: restore the radio once announcements finish
+  void play_voice_cue(bool error);
+  // Wake word capture: enables RX without touching the radio. Returns 1 ok, 0 fail,
+  // -1 = a voice session owns the audio path (retry later).
+  int wake_capture_begin();
+  uint32_t get_current_sample_rate() const { return this->current_sample_rate_; }
   bool is_voice_active() const { return this->voice_active_; }
   void voice_mic_requested(bool on) { this->mic_requested_ = on; }
   bool is_announcing() const { return this->announcing_; }
@@ -132,6 +137,7 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   void reconfig_sample_rate_(uint32_t new_rate);
   void play_uri_(const char *url);
   void restore_after_voice_();
+  static void voice_cue_task_(void *arg);
   void write_bridge_pcm_(const uint8_t *data, int size);
 
   // ESP-GMF callbacks (static, Core 0)
@@ -174,6 +180,10 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
 
   // Voice session state (Core 1 only, except announcing_ which Core 0 clears)
   bool voice_active_{false};         // a voice session owns the audio path
+  int voice_cue_pending_{0};
+  bool voice_cue_error_{false};
+  std::atomic<bool> voice_cue_active_{false};
+  std::atomic<bool> voice_cue_done_{false};
   bool voice_resume_radio_{false};   // radio was playing before the session
   void wait_stop_done_();            // block until the async voice stop finished (<= 5 s)
   volatile int stop_state_{0};       // async player stop for voice: 0 idle, 1 busy, 2 done

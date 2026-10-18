@@ -122,6 +122,13 @@ switch:
     dout_pin: 11
     pa_pin: 46
 
+  - platform: template
+    name: "Wake Word"
+    id: wake_word_enabled
+    icon: "mdi:account-voice"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
 # --- Winamp 2 Display ---
 
 winamp_display:
@@ -138,7 +145,9 @@ winamp_display:
           - voice_assistant.stop:
         else:
           # Show the voice screen immediately; the pipeline takes a moment to start
-          - lambda: id(display).set_voice_state(1);
+          - lambda: |-
+              id(display).set_voice_state(1);
+          - micro_wake_word.stop:
           - voice_assistant.start:
 
 # --- Hardware Buttons ---
@@ -168,6 +177,27 @@ microphone:
     id: box3_microphone
     radio_id: radio
     channel: left
+  # Second instance for wake word: listens while the radio plays (resampled to 16 kHz)
+  - platform: box3_mic
+    id: box3_wake_microphone
+    radio_id: radio
+    channel: left
+    wake_mode: true
+
+micro_wake_word:
+  id: mww
+  microphone:
+    microphone: box3_wake_microphone
+    gain_factor: 4
+  stop_after_detection: true
+  models:
+    - model: okay_nabu
+      probability_cutoff: 0.9
+  on_wake_word_detected:
+    - lambda: |-
+        ESP_LOGI("wake", "Wake word detected");
+        id(display).set_voice_state(1);
+    - voice_assistant.start:
 
 voice_assistant:
   id: va
@@ -181,6 +211,7 @@ voice_assistant:
         id(voice_state_text).publish_state("starting");
   on_listening:
     - lambda: |-
+        id(radio).play_voice_cue(false);
         id(display).set_voice_state(2);
         id(voice_state_text).publish_state("listening");
         id(voice_heard_text).publish_state("");
@@ -223,12 +254,21 @@ voice_assistant:
               }
   on_error:
     - lambda: |-
+        id(radio).play_voice_cue(true);
         id(radio).voice_session_end();
         id(display).set_voice_state(5);
         id(display).set_voice_reply(message.c_str());
         id(voice_state_text).publish_state("error");
 
 interval:
+  # Keep the wake word detector running whenever no voice session is active
+  - interval: 1s
+    then:
+      - lambda: |-
+          bool want = id(wake_word_enabled).state && !id(va).is_running() &&
+                      !id(radio).is_voice_active() && !id(radio).is_announcing();
+          if (want && !id(mww).is_running()) id(mww).start();
+          if (!id(wake_word_enabled).state && id(mww).is_running()) id(mww).stop();
   # Safety net: never leave the radio stopped if a voice session ended without on_end
   - interval: 2s
     then:
@@ -243,7 +283,9 @@ button:
     name: "Ask Assistant"
     icon: "mdi:microphone"
     on_press:
-      - lambda: id(display).set_voice_state(1);
+      - lambda: |-
+          id(display).set_voice_state(1);
+      - micro_wake_word.stop:
       - voice_assistant.start:
 
   - platform: template

@@ -15,6 +15,7 @@
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
 #include <cstring>
+#include <algorithm>
 
 // ─── ICY headers: captured by patched GMF HTTP event handler ───
 // The pre-build script (patch_gmf_http.py) patches the GMF HTTP IO
@@ -176,6 +177,24 @@ void InternetRadio::loop() {
 
   bool wifi_now = network::is_connected();
 
+  if (this->voice_cue_done_.exchange(false)) {
+    this->voice_cue_active_.store(false);
+    if (this->pa_pin_ >= 0 && !this->announcing_ &&
+        (i2s_bridge::I2SBridge::is_active() || !this->player_running_)) {
+      gpio_set_level(static_cast<gpio_num_t>(this->pa_pin_), 0);
+    }
+  }
+  if (this->voice_cue_pending_ && !this->voice_cue_active_.load() &&
+      this->codec_if_ && this->i2s_tx_) {
+    this->voice_cue_error_ = this->voice_cue_pending_ == 2;
+    this->voice_cue_pending_ = 0;
+    this->voice_cue_active_.store(true);
+    if (xTaskCreate(voice_cue_task_, "voice_cue", 6144, this, 4, nullptr) != pdPASS) {
+      ESP_LOGE(TAG, "Failed to create voice cue task");
+      this->voice_cue_active_.store(false);
+    }
+  }
+
   // Detect WiFi connect
   if (wifi_now && !this->wifi_connected_) {
     this->wifi_connected_ = true;
@@ -316,7 +335,8 @@ void InternetRadio::loop() {
     if (this->play_state_ != PS_PLAYING) this->announcing_ = false;
   }
   // Require the end request to be ~500ms old so a follow-up question can start its mic first
-  if (millis() - this->voice_end_ms_ >= 500 && voice_logic::should_restore(this->voice_end_pending_, this->announcing_,
+  if (!this->voice_cue_pending_ && !this->voice_cue_active_.load() &&
+      millis() - this->voice_end_ms_ >= 500 && voice_logic::should_restore(this->voice_end_pending_, this->announcing_,
                                   this->announce_pending_, this->mic_requested_,
                                   this->rx_enabled_)) {
     this->restore_after_voice_();
@@ -625,8 +645,13 @@ int InternetRadio::pcm_output_cb_(uint8_t *data, int size, void *ctx) {
   }
 
   // 3. Write to ES8311 speaker (bounded timeout to avoid hanging stop/reconnect)
-  esp_err_t err = i2s_channel_write(self->i2s_tx_, data, size, &written,
-                                    pdMS_TO_TICKS(100));
+  esp_err_t err = ESP_OK;
+  written = size;
+  if (!self->voice_cue_active_.load()) {
+    std::lock_guard<std::mutex> lock(self->i2s_cfg_mutex_);
+    if (!self->voice_cue_active_.load())
+      err = i2s_channel_write(self->i2s_tx_, data, size, &written, pdMS_TO_TICKS(100));
+  }
   if (err == ESP_ERR_TIMEOUT) {
     self->diag_i2s0_timeouts_++;
   } else if (err != ESP_OK) {
@@ -876,6 +901,44 @@ void InternetRadio::play_uri_(const char *url) {
 
 // ─── Voice assistant support ──────────────────────────────
 
+void InternetRadio::play_voice_cue(bool error) {
+  // Errors replace a queued listening cue; repeated listening events coalesce.
+  if (error || this->voice_cue_pending_ == 0) this->voice_cue_pending_ = error ? 2 : 1;
+}
+
+void InternetRadio::voice_cue_task_(void *arg) {
+  auto *self = static_cast<InternetRadio *>(arg);
+  {
+    std::lock_guard<std::mutex> lock(self->i2s_cfg_mutex_);
+    const uint32_t rate = self->current_sample_rate_;
+    const uint32_t frames = rate * (self->voice_cue_error_ ? 200 : 120) / 1000;
+    int16_t pcm[256 * 2];
+    if (self->pa_pin_ >= 0) {
+      gpio_set_level(static_cast<gpio_num_t>(self->pa_pin_), 1);
+      vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    for (uint32_t pos = 0; pos < frames;) {
+      const uint32_t count = std::min(uint32_t(256), frames - pos);
+      for (uint32_t i = 0; i < count; i++) {
+        pcm[2 * i] = pcm[2 * i + 1] = voice_logic::cue_sample(pos + i, rate, self->voice_cue_error_);
+      }
+      size_t written = 0;
+      const size_t bytes = count * 2 * sizeof(int16_t);
+      esp_err_t err = i2s_channel_write(self->i2s_tx_, pcm, bytes, &written, 100);
+      if (err != ESP_OK || written != bytes) {
+        ESP_LOGE(TAG, "Voice cue write failed: %s (%u/%u bytes)",
+                 esp_err_to_name(err), unsigned(written), unsigned(bytes));
+        break;
+      }
+      pos += count;
+    }
+    // Let the DMA drain before the loop restores the speaker routing.
+    vTaskDelay(pdMS_TO_TICKS(4096 * 1000 / rate + 10));
+  }
+  self->voice_cue_done_.store(true);
+  vTaskDelete(nullptr);
+}
+
 int InternetRadio::voice_capture_begin() {
   if (this->i2s_rx_ == nullptr) return 0;
   // A new capture cancels any pending restore (follow-up questions)
@@ -921,6 +984,21 @@ int InternetRadio::voice_capture_begin() {
     }
   }
   ESP_LOGI(TAG, "Voice capture started (radio resume=%d)", (int) this->voice_resume_radio_);
+  return 1;
+}
+
+int InternetRadio::wake_capture_begin() {
+  if (this->i2s_rx_ == nullptr) return 0;
+  if (this->voice_active_ || this->voice_end_pending_) return -1;
+  std::lock_guard<std::mutex> lock(this->i2s_cfg_mutex_);
+  if (!this->rx_enabled_) {
+    esp_err_t err = i2s_channel_enable(this->i2s_rx_);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "Wake RX enable failed: %s", esp_err_to_name(err));
+      return 0;
+    }
+    this->rx_enabled_ = true;
+  }
   return 1;
 }
 

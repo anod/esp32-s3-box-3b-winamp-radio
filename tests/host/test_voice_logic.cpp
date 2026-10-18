@@ -1,5 +1,8 @@
 // Host unit tests for components/internet_radio/media_player/voice_logic.h
 // Build/run: tests/run_host_tests.sh
+#include <vector>
+#include <cmath>
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include "../../components/internet_radio/media_player/voice_logic.h"
@@ -73,7 +76,73 @@ static void test_level_pct() {
   for (int v = 1; v < 32767; v++) CHECK(level_pct(v) <= level_pct(v + 1));
 }
 
+static void test_decimator() {
+  // Same rate: exact copy
+  Decimator same(16000);
+  int16_t a[5] = {1, -2, 300, -400, 32767}, o[8];
+  CHECK(same.process(16000, a, 5, o) == 5);
+  for (int i = 0; i < 5; i++) CHECK(o[i] == a[i]);
+
+  // DC is preserved and the output count matches the rate ratio
+  for (uint32_t rate : {44100u, 48000u, 22050u, 32000u}) {
+    Decimator d(16000);
+    std::vector<int16_t> in(rate, 1000), out(rate);
+    size_t total = 0;
+    for (int blk = 0; blk < 10; blk++) {
+      total += d.process(rate, in.data(), rate / 10, out.data() + total);
+    }
+    CHECK(total >= 16000 - 1 && total <= 16000);
+    for (size_t i = 0; i < total; i++) CHECK(out[i] == 1000);
+  }
+
+  // Low-rate input cannot be decimated: nothing produced
+  Decimator low(16000);
+  CHECK(low.process(8000, a, 5, o) == 0);
+
+  // A full-scale 1 kHz tone survives 48k -> 16k at near full amplitude
+  Decimator d(16000);
+  std::vector<int16_t> tone(4800), res(4800);
+  for (int i = 0; i < 4800; i++) tone[i] = (int16_t) (30000 * sin(2 * M_PI * 1000 * i / 48000.0));
+  size_t n = d.process(48000, tone.data(), tone.size(), res.data());
+  int pk = 0;
+  for (size_t i = 0; i < n; i++) pk = std::max(pk, abs((int) res[i]));
+  CHECK(n == 1600 && pk > 28000);
+
+  // Rate change resets state without overrunning
+  Decimator r(16000);
+  std::vector<int16_t> buf(1000, 5), outb(1000);
+  r.process(44100, buf.data(), 1000, outb.data());
+  size_t m = r.process(48000, buf.data(), 1000, outb.data());
+  CHECK(m >= 333 && m <= 334);
+}
+
+static void test_cues() {
+  for (uint32_t rate : {16000u, 44100u, 48000u}) {
+    for (bool error : {false, true}) {
+      const uint32_t note = rate * (error ? 100 : 60) / 1000;
+      int peak = 0;
+      int crossings[2] = {0, 0};
+      for (uint32_t i = 0; i < note * 2; i++) {
+        const int sample = cue_sample(i, rate, error);
+        CHECK(abs(sample) <= 4000);
+        peak = std::max(peak, abs(sample));
+        if (i % note && sample > 0 && cue_sample(i - 1, rate, error) <= 0)
+          crossings[i / note]++;
+      }
+      CHECK(peak > 3900);
+      CHECK(cue_sample(0, rate, error) == 0);
+      CHECK(cue_sample(note - 1, rate, error) == 0);
+      CHECK(cue_sample(note, rate, error) == 0);
+      CHECK(cue_sample(note * 2 - 1, rate, error) == 0);
+      CHECK(cue_sample(note * 2, rate, error) == 0);
+      CHECK(error ? crossings[0] > crossings[1] : crossings[0] < crossings[1]);
+    }
+  }
+}
+
 int main() {
+  test_cues();
+  test_decimator();
   test_level_pct();
   test_should_restore();
   test_gain();

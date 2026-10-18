@@ -13,6 +13,7 @@ CODEOWNERS = ["@alexg"]
 DEPENDENCIES = ["network"]
 
 CONF_RADIO_ID = "radio_id"
+CONF_WAKE_MODE = "wake_mode"
 
 Box3Mic = box3_mic_ns.class_("Box3Mic", microphone.Microphone, cg.Component)
 InternetRadio = cg.esphome_ns.namespace("internet_radio").class_("InternetRadio")
@@ -35,6 +36,8 @@ CONFIG_SCHEMA = cv.All(
         {
             cv.GenerateID(): cv.declare_id(Box3Mic),
             cv.Required(CONF_RADIO_ID): cv.use_id(InternetRadio),
+            # Wake mode keeps listening while the radio plays (for micro_wake_word)
+            cv.Optional(CONF_WAKE_MODE, default=False): cv.boolean,
             # ES7210 puts MIC1 in the left slot and MIC2 in the right slot
             cv.Optional(CONF_CHANNEL, default="left"): cv.one_of(
                 "left", "right", lower=True
@@ -53,3 +56,4 @@ async def to_code(config):
     radio = await cg.get_variable(config[CONF_RADIO_ID])
     cg.add(var.set_radio(radio))
     cg.add(var.set_use_right_channel(config[CONF_CHANNEL] == "right"))
+    cg.add(var.set_wake_mode(config[CONF_WAKE_MODE]))
