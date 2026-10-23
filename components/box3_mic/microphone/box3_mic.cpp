@@ -1,6 +1,7 @@
 #include "box3_mic.h"
 #include "../../internet_radio/media_player/voice_logic.h"
 #include "esphome/core/log.h"
+#include "esp_attr.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -11,7 +12,32 @@ namespace box3_mic {
 
 static const char *const TAG = "box3_mic";
 
+enum CapturePhase : uint32_t { CAPTURE_STOPPED, CAPTURE_READ, CAPTURE_RESAMPLE, CAPTURE_BUFFER };
+static const char *const CAPTURE_PHASE_NAMES[] = {"stopped", "read", "resample", "buffer"};
+static constexpr uint32_t CAPTURE_TRACE_MAGIC = 0x4D494331;
+
+// Volatile stage markers survive panic resets even if the final log never reaches the API.
+struct CaptureTrace {
+  volatile uint32_t magic;
+  volatile uint32_t wake;
+  volatile uint32_t phase;
+  volatile uint32_t uptime_ms;
+  volatile uint32_t rate;
+  volatile uint32_t frames;
+  volatile uint32_t samples;
+  volatile uint32_t stack_min;
+  volatile uint32_t process_max_us;
+};
+static RTC_NOINIT_ATTR CaptureTrace capture_trace;
+static CaptureTrace previous_capture_trace{};
+static const Box3Mic *trace_owner = nullptr;
+
 void Box3Mic::setup() {
+  if (trace_owner == nullptr) {
+    trace_owner = this;
+    previous_capture_trace = capture_trace;
+    capture_trace.magic = 0;
+  }
   this->audio_stream_info_ = audio::AudioStreamInfo(16, 1, 16000);
   this->stream_ = xStreamBufferCreate(STREAM_BYTES, 1);
   if (this->stream_ == nullptr) {
@@ -23,6 +49,17 @@ void Box3Mic::setup() {
 void Box3Mic::dump_config() {
   ESP_LOGCONFIG(TAG, "BOX-3 Microphone:\n  Channel: %s\n  Mode: %s\n  Format: 16 kHz mono 16-bit",
                 this->use_right_ ? "right" : "left", this->wake_mode_ ? "wake" : "session");
+  if (trace_owner == this && previous_capture_trace.magic == CAPTURE_TRACE_MAGIC) {
+    uint32_t phase = previous_capture_trace.phase;
+    ESP_LOGW(TAG,
+             "Previous mic trace: mode=%s phase=%s uptime_ms=%lu rate=%lu frames=%lu out=%lu "
+             "stack_min=%lu process_max_us=%lu",
+             previous_capture_trace.wake ? "wake" : "session",
+             phase <= CAPTURE_BUFFER ? CAPTURE_PHASE_NAMES[phase] : "unknown",
+             (unsigned long) previous_capture_trace.uptime_ms, (unsigned long) previous_capture_trace.rate,
+             (unsigned long) previous_capture_trace.frames, (unsigned long) previous_capture_trace.samples,
+             (unsigned long) previous_capture_trace.stack_min, (unsigned long) previous_capture_trace.process_max_us);
+  }
 }
 
 void Box3Mic::start() {
@@ -160,10 +197,51 @@ void Box3Mic::run_capture_() {
   const int pick = this->use_right_ ? 1 : 0;
   int peak[2] = {0, 0};
   int blocks = 0;
+  uint32_t last_diag_ms = millis();
+  uint32_t timeouts = 0;
+  uint32_t read_errors = 0;
+  esp_err_t last_read_error = ESP_OK;
+  uint32_t short_reads = 0;
+  capture_trace.magic = 0;
+  capture_trace.wake = this->wake_mode_;
+  capture_trace.phase = CAPTURE_STOPPED;
+  capture_trace.uptime_ms = last_diag_ms;
+  capture_trace.rate = this->radio_->get_current_sample_rate();
+  capture_trace.frames = 0;
+  capture_trace.samples = 0;
+  capture_trace.stack_min = uxTaskGetStackHighWaterMark(nullptr);
+  capture_trace.process_max_us = 0;
+  capture_trace.magic = CAPTURE_TRACE_MAGIC;
 
   while (!this->task_stop_) {
+    uint32_t now = millis();
+    if (now - last_diag_ms >= 5000) {
+      capture_trace.stack_min = uxTaskGetStackHighWaterMark(nullptr);
+      ESP_LOGD(TAG,
+               "Mic diag: mode=%s rate=%lu frames=%lu out=%lu stack_min=%lu process_max_us=%lu "
+               "timeouts=%lu read_err=%lu last_err=%s short=%lu buffered=%u dropped=%lu",
+               this->wake_mode_ ? "wake" : "session", (unsigned long) capture_trace.rate,
+               (unsigned long) capture_trace.frames, (unsigned long) capture_trace.samples,
+               (unsigned long) capture_trace.stack_min, (unsigned long) capture_trace.process_max_us,
+               (unsigned long) timeouts, (unsigned long) read_errors, esp_err_to_name(last_read_error),
+               (unsigned long) short_reads, unsigned(xStreamBufferBytesAvailable(this->stream_)),
+               (unsigned long) this->dropped_bytes_);
+      last_diag_ms = now;
+      timeouts = read_errors = short_reads = 0;
+      last_read_error = ESP_OK;
+      capture_trace.process_max_us = 0;
+    }
+    capture_trace.uptime_ms = now;
+    capture_trace.phase = CAPTURE_READ;
     size_t got = 0;
     esp_err_t err = i2s_channel_read(rx, frames, sizeof(frames), &got, 100);
+    if (err == ESP_ERR_TIMEOUT) {
+      timeouts++;
+    } else if (err != ESP_OK) {
+      read_errors++;
+      last_read_error = err;
+    }
+    if (err == ESP_OK && (got < 4 || got % 4 != 0)) short_reads++;
     if (err != ESP_OK || got < 4) {
       vTaskDelay(pdMS_TO_TICKS(5));
       continue;
@@ -178,7 +256,21 @@ void Box3Mic::run_capture_() {
       env -= env / 8;
       internet_radio::voice_logic::g_mic_peak = block_peak[pick] > env ? block_peak[pick] : env;
     }
-    size_t out_n = dec.process(this->radio_->get_current_sample_rate(), mono, n, out);
+    uint32_t rate = this->radio_->get_current_sample_rate();
+    if (rate != capture_trace.rate) {
+      ESP_LOGD(TAG, "Mic rate changed: mode=%s %lu -> %lu Hz", this->wake_mode_ ? "wake" : "session",
+               (unsigned long) capture_trace.rate, (unsigned long) rate);
+    }
+    capture_trace.rate = rate;
+    capture_trace.frames = n;
+    capture_trace.samples = 0;
+    capture_trace.phase = CAPTURE_RESAMPLE;
+    uint32_t process_start = micros();
+    size_t out_n = dec.process(rate, mono, n, out);
+    uint32_t process_us = micros() - process_start;
+    if (process_us > capture_trace.process_max_us) capture_trace.process_max_us = process_us;
+    capture_trace.samples = out_n;
+    capture_trace.phase = CAPTURE_BUFFER;
     size_t bytes = out_n * sizeof(int16_t);
     if (bytes > 0) {
       size_t sent = xStreamBufferSend(this->stream_, out, bytes, 0);
@@ -192,6 +284,8 @@ void Box3Mic::run_capture_() {
       blocks = 0;
     }
   }
+  capture_trace.uptime_ms = millis();
+  capture_trace.phase = CAPTURE_STOPPED;
 }
 
 }  // namespace box3_mic

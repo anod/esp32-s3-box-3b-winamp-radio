@@ -75,6 +75,23 @@ class GeneratedCodeTests(unittest.TestCase):
         self.assertRegex(self.cpp, r"va->set_media_player\(radio\)")
         self.assertRegex(self.cpp, r"va->set_microphone_source\(")
 
+    def test_crash_diagnostics_wired_and_internal(self):
+        for setter, sensor in (
+            ("free", "diag_heap_free"), ("min_free", "diag_heap_min"),
+            ("block", "diag_heap_block"), ("psram", "diag_psram_free"),
+            ("loop_time", "diag_loop_time"), ("reset_reason", "diag_reset_reason"),
+        ):
+            setter_call = f"radio_debug->set_{setter}_sensor({sensor});"
+            self.assertTrue(setter_call in self.cpp, setter_call)
+        for sensor in ("diag_heap_free", "diag_heap_min", "diag_heap_block",
+                       "diag_psram_free", "diag_loop_time", "diag_reset_reason", "diag_uptime"):
+            internal = re.search(
+                rf"App\.register_(?:text_)?sensor\({sensor},[^\n]*// internal\b", self.cpp
+            )
+            self.assertIsNotNone(internal, f"{sensor} must stay internal")
+        self.assertTrue("radio_debug->set_update_interval(5000);" in self.cpp)
+        self.assertTrue('ESP_LOGD("radio_health", "Health: uptime=' in self.cpp)
+
 
 @unittest.skipUnless(os.path.exists(ELF) and toolchain("gcc-nm"), "no built firmware.elf / toolchain")
 class FirmwareImageTests(unittest.TestCase):

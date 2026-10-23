@@ -79,6 +79,21 @@ usbipd attach --wsl --busid <BUSID>  # re-run after each device reset
 
 In WSL, grant serial access once: `sudo usermod -aG dialout $USER` (re-login required).
 
+### Crash diagnostics
+
+DEBUG `Health` logs include internal heap free/minimum/largest block, free PSRAM,
+maximum main-loop time, and uptime every 5 seconds. The debug component also reports the
+reset reason. These sensors are internal and do not add Home Assistant entities.
+`Mic diag` reports capture mode, sample rate, input/output sample counts, minimum
+remaining task stack in bytes, maximum resampling time in microseconds, I2S
+timeouts/errors, and buffer backlog/dropped bytes.
+
+A small RTC-memory `Previous mic trace` survives panic/software resets while the
+board remains powered and is replayed when an API log client requests the config.
+Its `read`, `resample`, `buffer`, or `stopped` stage identifies the last microphone
+operation, not necessarily the cause of a reset elsewhere. Keep the matching
+`firmware.elf` for each flashed build to decode ESPHome's retained crash addresses.
+
 ## Controls
 
 | Input              | Action                         |

@@ -48,6 +48,10 @@ external_components:
 logger:
   level: DEBUG
 
+debug:
+  id: radio_debug
+  update_interval: 5s
+
 api:
   # 2026.5.x lowered the ESP32 default from 8 to 5; keep the old headroom explicit.
   max_connections: 8
@@ -275,8 +279,50 @@ interval:
       - lambda: |-
           if (!id(va).is_running() && id(radio).is_voice_active() && !id(radio).is_announcing())
             id(radio).voice_session_end();
+  - interval: 5s
+    then:
+      - lambda: |-
+          if (id(diag_uptime).has_state() && id(diag_heap_free).has_state() &&
+              id(diag_heap_min).has_state() && id(diag_heap_block).has_state() &&
+              id(diag_psram_free).has_state() && id(diag_loop_time).has_state()) {
+            ESP_LOGD("radio_health", "Health: uptime=%.0fs heap_free=%.0f heap_min=%.0f heap_block=%.0f "
+                     "psram_free=%.0f loop_max=%.0fms",
+                     id(diag_uptime).state, id(diag_heap_free).state, id(diag_heap_min).state,
+                     id(diag_heap_block).state, id(diag_psram_free).state, id(diag_loop_time).state);
+          } else {
+            ESP_LOGD("radio_health", "Health: waiting for first samples");
+          }
 
 # --- HA Entities (song title, station picker, controls) ---
+
+sensor:
+  - platform: debug
+    debug_id: radio_debug
+    free:
+      name: "Diagnostic Internal Heap Free"
+      id: diag_heap_free
+      internal: true
+    min_free:
+      name: "Diagnostic Internal Heap Minimum"
+      id: diag_heap_min
+      internal: true
+    block:
+      name: "Diagnostic Internal Heap Largest Block"
+      id: diag_heap_block
+      internal: true
+    psram:
+      name: "Diagnostic PSRAM Free"
+      id: diag_psram_free
+      internal: true
+    loop_time:
+      name: "Diagnostic Maximum Loop Time"
+      id: diag_loop_time
+      internal: true
+  - platform: uptime
+    name: "Diagnostic Uptime"
+    id: diag_uptime
+    internal: true
+    update_interval: 5s
 
 button:
   - platform: template
@@ -301,6 +347,12 @@ button:
       - lambda: id(radio).prev_station_();
 
 text_sensor:
+  - platform: debug
+    debug_id: radio_debug
+    reset_reason:
+      name: "Diagnostic Reset Reason"
+      id: diag_reset_reason
+      internal: true
   # Voice assistant status + conversation trace (also visible in HA Assist debug)
   - platform: template
     name: "Voice Assistant State"
