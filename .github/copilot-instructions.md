@@ -34,7 +34,6 @@ components/
 │       ├── __init__.py          # Schema, codegen, IDF component deps
 │       ├── internet_radio.h     # MediaPlayer subclass
 │       ├── internet_radio.cpp   # ESP-GMF pipeline, ICY metadata, volume
-│       └── patch_gmf_http.py    # Pre-build: patches GMF for ICY header capture
 ├── i2s_bridge/
 │   ├── __init__.py              # Defines i2s_bridge_ns
 │   └── switch/
@@ -87,10 +86,9 @@ Split across two cores for zero audio-path overhead:
 Extracts StreamTitle from Icecast/Shoutcast streams:
 
 - **Request**: `Icy-MetaData: 1` header added in `PRE_REQUEST` callback
-- **Response header**: `icy-metaint: N` captured by patched GMF HTTP handler (stored in `volatile int g_icy_metaint`)
+- **Response headers**: `icy-metaint: N` and `icy-br` read through ESP-IDF's saved response-header API
 - **Stream format**: N audio bytes → 1 length byte (×16 = metadata size) → metadata text → repeat
 - **Implementation**: `icy_read_()` state machine strips metadata inline, `parse_icy_metadata_()` extracts StreamTitle
-- **Patch script**: `patch_gmf_http.py` — required because `esp_http_client` has no public API to read response headers (they're dispatched via event callback then freed immediately)
 - Max metadata block: 255 × 16 = 4080 bytes. Buffer is 512 bytes — excess is silently truncated (titles >~500 chars are extremely rare).
 
 ### Component Setup Priority

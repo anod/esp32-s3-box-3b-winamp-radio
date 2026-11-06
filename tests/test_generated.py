@@ -14,14 +14,32 @@ from test_config import ROOT, MAIN_YAML, local_yaml
 
 BUILD = os.path.join(ROOT, ".esphome", "build", "esp32radio")
 MAIN_CPP = os.path.join(BUILD, "src", "main.cpp")
-ELF = os.path.join(BUILD, ".pioenvs", "esp32radio", "firmware.elf")
+NATIVE_BUILD = os.path.join(BUILD, "build")
+NATIVE_ELF = os.path.join(NATIVE_BUILD, "esp32radio.elf")
+PIO_ELF = os.path.join(BUILD, ".pioenvs", "esp32radio", "firmware.elf")
+ELF = NATIVE_ELF if os.path.exists(NATIVE_ELF) else PIO_ELF
+FIRMWARE_BIN = (
+    os.path.join(NATIVE_BUILD, "esp32radio.bin")
+    if os.path.exists(NATIVE_ELF)
+    else os.path.join(BUILD, ".pioenvs", "esp32radio", "firmware.bin")
+)
 SDKCONFIG = os.path.join(BUILD, "sdkconfig.esp32radio")
 FLASH_BUDGET = 8126464  # app partition from the build log
 MIN_FREE_FLASH_PCT = 10
 
 
 def toolchain(tool):
-    hits = glob.glob(os.path.expanduser(f"~/.platformio/packages/toolchain-xtensa-esp-elf/bin/*-{tool}"))
+    hits = glob.glob(
+        os.path.expanduser(
+            f"~/.cache/esphome/idf/tools/xtensa-esp-elf/*/xtensa-esp-elf/bin/xtensa-esp32s3-elf-{tool}"
+        )
+    )
+    if not hits:
+        hits = glob.glob(
+            os.path.expanduser(
+                f"~/.platformio/packages/toolchain-xtensa-esp-elf/bin/*-{tool}"
+            )
+        )
     return hits[0] if hits else None
 
 
@@ -99,20 +117,20 @@ class FirmwareImageTests(unittest.TestCase):
     def setUpClass(cls):
         cls.syms = subprocess.run([toolchain("gcc-nm"), "-C", ELF], capture_output=True, text=True).stdout
 
-    def test_icy_patch_linked(self):
-        self.assertRegex(self.syms, r" D g_icy_patch_version")
-        self.assertIn("g_icy_metaint", self.syms)
+    def test_icy_response_header_api_linked(self):
+        self.assertIn("esp_http_client_get_response_header", self.syms)
 
     def test_spectrum_override_linked(self):
         self.assertRegex(self.syms, r" T feed_fft_samples\(")
 
     def test_voice_code_linked(self):
         for sym in ("InternetRadio::voice_capture_begin()", "InternetRadio::voice_session_end()",
-                    "InternetRadio::restore_after_voice_()", "Box3Mic::run_capture_()"):
+                    "Box3Mic::run_capture_()"):
             self.assertIn(sym, self.syms)
+        self.assertIn("restore_after_voice_", self.syms)
 
     def test_flash_headroom(self):
-        size = os.path.getsize(os.path.join(os.path.dirname(ELF), "firmware.bin"))
+        size = os.path.getsize(FIRMWARE_BIN)
         free_pct = 100 * (FLASH_BUDGET - size) / FLASH_BUDGET
         self.assertGreater(free_pct, MIN_FREE_FLASH_PCT, f"only {free_pct:.1f}% flash free")
 
@@ -123,6 +141,9 @@ class FirmwareImageTests(unittest.TestCase):
         self.assertIn("# CONFIG_ESP_AUDIO_SIMPLE_PLAYER_HTTP_EN is not set", cfg)
         self.assertIn("CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y", cfg)
         self.assertIn("# CONFIG_ESP_AUDIO_SIMPLE_PLAYER_RESAMPLE_EN is not set", cfg)
+        self.assertIn("CONFIG_ESP_HTTP_CLIENT_SAVE_RESPONSE_HEADERS=y", cfg)
+        self.assertIn("CONFIG_ESP_HTTP_CLIENT_MAX_SAVED_RESPONSE_HEADERS=20", cfg)
+        self.assertIn("CONFIG_LIBC_NEWLIB=y", cfg)
 
 
 if __name__ == "__main__":

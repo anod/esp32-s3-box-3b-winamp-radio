@@ -15,8 +15,48 @@
 #include "esphome/components/i2c/i2c.h"
 #include "esphome/components/number/number.h"
 
-// LGFX_USE_V1 and LGFX_AUTODETECT are set via build flags
 #include <LovyanGFX.hpp>
+
+class LGFX final : public lgfx::LGFX_Device {
+ public:
+  LGFX() {
+    auto bus_cfg = this->bus_.config();
+    bus_cfg.spi_host = SPI2_HOST;
+    bus_cfg.spi_mode = 0;
+    bus_cfg.freq_write = 40000000;
+    bus_cfg.freq_read = 16000000;
+    bus_cfg.spi_3wire = true;
+    bus_cfg.use_lock = true;
+    bus_cfg.dma_channel = SPI_DMA_CH_AUTO;
+    bus_cfg.pin_mosi = 6;
+    bus_cfg.pin_miso = -1;
+    bus_cfg.pin_sclk = 7;
+    bus_cfg.pin_dc = 4;
+    this->bus_.config(bus_cfg);
+
+    auto panel_cfg = this->panel_.config();
+    panel_cfg.pin_cs = 5;
+    panel_cfg.pin_rst = -1;
+    panel_cfg.offset_rotation = 1;
+    this->panel_.config(panel_cfg);
+    this->panel_.setBus(&this->bus_);
+    this->panel_.setRotation(1);
+
+    auto light_cfg = this->light_.config();
+    light_cfg.pin_bl = 47;
+    light_cfg.freq = 12000;
+    light_cfg.pwm_channel = 0;
+    light_cfg.invert = false;
+    this->light_.config(light_cfg);
+    this->panel_.setLight(&this->light_);
+    this->setPanel(&this->panel_);
+  }
+
+ private:
+  lgfx::Panel_ILI9342 panel_;
+  lgfx::Bus_SPI bus_;
+  lgfx::Light_PWM light_;
+};
 
 // Spectrum analyser — Core 0 captures samples, Core 1 runs FFT
 extern float spec_bands[16];

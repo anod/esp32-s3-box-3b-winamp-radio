@@ -4,20 +4,17 @@
 esphome:
   name: esp32radio
   friendly_name: "ESP32 Radio"
-  min_version: 2026.9.0
-  platformio_options:
-    build_flags:
-      - -O2
-      - -DBOARD_HAS_PSRAM
+  min_version: 2026.10.2
 
 esp32:
   board: esp32s3box
-  # ESPHome 2026.7+ defaults to the native ESP-IDF toolchain. Keep PlatformIO
-  # for the ESP-GMF pre-build patch and the build path validated on this board.
-  toolchain: platformio
+  toolchain: esp-idf
   flash_size: 16MB
   framework:
     type: esp-idf
+    version: 6.0.1
+    advanced:
+      compiler_optimization: PERF
     sdkconfig_options:
       # ESP-GMF: disable built-in HTTP IO (we register our own with cert bundle)
       CONFIG_ESP_AUDIO_SIMPLE_PLAYER_HTTP_EN: "n"
@@ -29,6 +26,10 @@ esp32:
       # Enable TLS cert bundle for HTTPS streams
       CONFIG_MBEDTLS_CERTIFICATE_BUNDLE: "y"
       CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL: "y"
+      CONFIG_ESP_HTTP_CLIENT_SAVE_RESPONSE_HEADERS: "y"
+      CONFIG_ESP_HTTP_CLIENT_MAX_SAVED_RESPONSE_HEADERS: "20"
+      # Espressif's prebuilt audio codec archives are linked against Newlib.
+      CONFIG_LIBC_NEWLIB: "y"
 
 psram:
   mode: octal

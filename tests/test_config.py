@@ -21,8 +21,7 @@ def local_yaml(text):
         text,
         flags=re.S,
     )
-    # the installed ESPHome may be older than the project's minimum
-    return re.sub(r"min_version: [\d.]+", "min_version: 2026.5.0", text)
+    return re.sub(r"min_version: [\d.]+", "min_version: 2026.10.2", text)
 
 
 def run_config(text):

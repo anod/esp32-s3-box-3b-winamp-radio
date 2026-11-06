@@ -14,19 +14,9 @@
 #include "driver/i2c_master.h"
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
+#include <cstdlib>
 #include <cstring>
 #include <algorithm>
-
-// ─── ICY headers: captured by patched GMF HTTP event handler ───
-// The pre-build script (patch_gmf_http.py) patches the GMF HTTP IO
-// internal event handler to capture icy-metaint and icy-br response
-// headers into these globals. We read them on first ON_RESPONSE.
-// Safety: headers are parsed during esp_http_client_fetch_headers()
-// which completes before any _http_read() call, so the globals are
-// always written before our ON_RESPONSE callback reads them.
-extern "C" volatile int g_icy_metaint = 0;
-extern "C" volatile int g_icy_bitrate = 0;  // kbps from icy-br header
-extern "C" volatile int g_icy_patch_version;
 
 // FFT sample feed (defined in spectrum.cpp)
 extern void feed_fft_samples(const uint8_t *data, int size);
@@ -472,11 +462,6 @@ void InternetRadio::init_player_() {
 }
 
 void InternetRadio::init_http_io_() {
-  if (g_icy_patch_version != 1) {
-    ESP_LOGE(TAG, "GMF HTTP ICY patch is unavailable");
-    return;
-  }
-
   http_io_cfg_t http_cfg = HTTP_STREAM_CFG_DEFAULT();
   http_cfg.dir = ESP_GMF_IO_DIR_READER;
   http_cfg.crt_bundle_attach = esp_crt_bundle_attach;
@@ -588,8 +573,6 @@ int InternetRadio::http_event_cb_(http_stream_event_msg_t *msg) {
     auto client = static_cast<esp_http_client_handle_t>(msg->http_client);
     esp_http_client_set_header(client, "Icy-MetaData", "1");
     // Reset ICY state for new connection
-    g_icy_metaint = 0;
-    g_icy_bitrate = 0;
     self->icy_metaint_ = 0;
     self->bitrate_ = 0;
     self->icy_remaining_ = 0;
@@ -602,10 +585,15 @@ int InternetRadio::http_event_cb_(http_stream_event_msg_t *msg) {
   if (msg->event_id == HTTP_STREAM_ON_RESPONSE) {
     auto client = static_cast<esp_http_client_handle_t>(msg->http_client);
 
-    // On first response, check for ICY headers (captured by patched GMF)
+    // GMF fetches response headers before dispatching its first read callback.
     if (!self->icy_header_checked_) {
       self->icy_header_checked_ = true;
-      int metaint = g_icy_metaint;
+      char *header_value = nullptr;
+      int metaint = 0;
+      if (esp_http_client_get_response_header(client, "icy-metaint", &header_value) == ESP_OK &&
+          header_value != nullptr) {
+        metaint = std::atoi(header_value);
+      }
       if (metaint > 0) {
         self->icy_metaint_ = metaint;
         self->icy_remaining_ = metaint;
@@ -613,7 +601,12 @@ int InternetRadio::http_event_cb_(http_stream_event_msg_t *msg) {
       } else {
         ESP_LOGD(TAG, "No ICY metadata in response");
       }
-      int br = g_icy_bitrate;
+      header_value = nullptr;
+      int br = 0;
+      if (esp_http_client_get_response_header(client, "icy-br", &header_value) == ESP_OK &&
+          header_value != nullptr) {
+        br = std::atoi(header_value);
+      }
       if (br > 0) {
         self->bitrate_ = br;
         ESP_LOGI(TAG, "ICY bitrate: %d kbps", br);

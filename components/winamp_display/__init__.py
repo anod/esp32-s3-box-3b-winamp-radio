@@ -70,11 +70,8 @@ async def to_code(config):
         await automation.build_automation(trig, [], conf)
 
     # LovyanGFX library
-    cg.add_library("lovyan03/LovyanGFX", "1.2.19")
+    cg.add_library("lovyan03/LovyanGFX", "1.2.20")
 
     # LovyanGFX Bus_Parallel16 needs esp_lcd IDF component (excluded by default)
     include_builtin_idf_component("esp_lcd")
-
-    # Build flags for LovyanGFX autodetect
-    cg.add_build_flag("-DLGFX_USE_V1")
-    cg.add_build_flag("-DLGFX_AUTODETECT")
+    include_builtin_idf_component("esp_driver_ledc")
