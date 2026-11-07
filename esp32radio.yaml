@@ -26,6 +26,9 @@ esp32:
       # Enable TLS cert bundle for HTTPS streams
       CONFIG_MBEDTLS_CERTIFICATE_BUNDLE: "y"
       CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL: "y"
+      # AAC needs a contiguous 35,460-byte internal buffer. Keep TLS buffers
+      # in PSRAM so HTTPS does not fragment/starve that decoder allocation.
+      CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC: "y"
       CONFIG_ESP_HTTP_CLIENT_SAVE_RESPONSE_HEADERS: "y"
       CONFIG_ESP_HTTP_CLIENT_MAX_SAVED_RESPONSE_HEADERS: "20"
       # Espressif's prebuilt audio codec archives are linked against Newlib.
@@ -110,12 +113,15 @@ media_player:
     i2s_din_pin: 16  # ES7210 mic data (shared I2S0, duplex)
     i2s_mclk_pin: 2
     # Power amplifier enable
-    pa_pin: 46
+    pa_pin:
+      number: 46
+      allow_other_uses: true
     # Default volume (0-21)
     default_volume: 15
     # HA entity references (publish-on-change from C++)
     now_playing_id: now_playing
     station_select_id: station_select
+    playback_phase_id: playback_phase
 
 switch:
   - platform: i2s_bridge
@@ -125,7 +131,9 @@ switch:
     bclk_pin: 10
     lrck_pin: 14
     dout_pin: 11
-    pa_pin: 46
+    pa_pin:
+      number: 46
+      allow_other_uses: true
 
   - platform: template
     name: "Wake Word"
@@ -339,15 +347,19 @@ button:
     name: "Next Station"
     icon: "mdi:skip-next"
     on_press:
-      - lambda: id(radio).next_station_();
+      - media_player.next: radio
 
   - platform: template
     name: "Previous Station"
     icon: "mdi:skip-previous"
     on_press:
-      - lambda: id(radio).prev_station_();
+      - media_player.previous: radio
 
 text_sensor:
+  - platform: template
+    name: "Playback Phase"
+    id: playback_phase
+    entity_category: diagnostic
   - platform: debug
     debug_id: radio_debug
     reset_reason:

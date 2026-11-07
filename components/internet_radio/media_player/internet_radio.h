@@ -16,6 +16,7 @@
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <freertos/queue.h>
 #include <atomic>
 #include "driver/i2s_std.h"
 
@@ -68,6 +69,8 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   // Optional HA entity references (for direct publish-on-change)
   void set_now_playing_sensor(text_sensor::TextSensor *s) { this->now_playing_sensor_ = s; }
   void set_station_select(select::Select *s) { this->station_select_ = s; }
+  void set_playback_phase_sensor(text_sensor::TextSensor *s) { this->playback_phase_sensor_ = s; }
+  const char *get_playback_phase() const;
 
   // Public accessors for bridge component and template entities
   volatile PlayState &get_play_state() { return this->play_state_; }
@@ -135,8 +138,46 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   void init_player_();
   void init_http_io_();
   void reconfig_sample_rate_(uint32_t new_rate);
-  void play_uri_(const char *url);
+  bool play_uri_(const char *url, bool announcement = false);
   void restore_after_voice_();
+  enum class PlayerOperation { STOP, RUN, PAUSE, RESUME };
+  struct PlayerCommand {
+    PlayerOperation operation;
+    uint32_t generation;
+    uint32_t stream_epoch;  // STOP/RUN only; fences the HTTP reader of older streams
+    bool announcement;
+    char uri[300];
+  };
+  bool request_player_(PlayerOperation operation, const char *uri = nullptr, bool announcement = false);
+  static void player_control_task_(void *arg);
+  QueueHandle_t player_commands_{nullptr};
+  std::atomic<uint32_t> player_generation_{0};
+  std::atomic<uint32_t> player_completed_{0};
+  std::atomic<bool> accept_player_events_{false};
+  std::atomic<bool> pcm_enabled_{false};
+  std::mutex player_request_mutex_;
+  std::atomic<bool> announcement_output_{false};
+  std::atomic<bool> player_control_fault_{false};
+  std::atomic<bool> playback_requested_{false};
+  std::atomic<bool> pcm_started_{false};
+  // Startup clock: stamped by the worker right before the pipeline run.
+  std::atomic<bool> playback_launched_{false};
+  std::atomic<uint32_t> playback_start_ms_{0};
+  unsigned long player_command_ms_{0};
+  // HTTP cancellation: stream_epoch_ advances on every STOP/RUN request (Core 1);
+  // http_epoch_ is the epoch the running pipeline was launched with (worker).
+  std::atomic<uint32_t> stream_epoch_{0};
+  std::atomic<uint32_t> http_epoch_{0};
+  std::atomic<uint32_t> http_cancel_logged_{0};
+  bool http_cancelled_() const { return this->http_epoch_.load() != this->stream_epoch_.load(); }
+  int http_fence_(const char *where);
+  int http_read_(esp_http_client_handle_t client, char *buf, int len);
+  bool player_command_pending_() const {
+    return this->player_generation_.load() != this->player_completed_.load();
+  }
+  uint32_t diag_loop_max_us_{0};
+  unsigned long diag_loop_last_ms_{0};
+  uint32_t diag_loop_gap_max_ms_{0};
   static void voice_cue_task_(void *arg);
   void write_bridge_pcm_(const uint8_t *data, int size);
 
@@ -162,6 +203,7 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   int icy_meta_remaining_{0};    // metadata bytes left to skip/collect
   int icy_meta_idx_{0};          // current write position in icy_meta_buf_
   bool icy_header_checked_{false}; // true after first response checks headers
+  bool http_owns_reads_{false};    // callback performs cancellable body reads
   char icy_meta_buf_[512]{};     // metadata text buffer
 
   // ES8311 codec interface (direct calls, no esp_codec_dev wrapper)
@@ -185,10 +227,8 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   std::atomic<bool> voice_cue_active_{false};
   std::atomic<bool> voice_cue_done_{false};
   bool voice_resume_radio_{false};   // radio was playing before the session
-  void wait_stop_done_();            // block until the async voice stop finished (<= 5 s)
-  volatile int stop_state_{0};       // async player stop for voice: 0 idle, 1 busy, 2 done
   bool voice_end_pending_{false};    // session over, waiting for TTS to finish
-  volatile bool announcing_{false};  // TTS announcement is playing
+  std::atomic<bool> announcing_{false};  // requested/active announcement; fenced at teardown
   volatile bool mic_requested_{false};   // box3_mic wants/has the capture path
   volatile bool announce_pending_{false};  // an enqueued announcement URL is waiting
   char pending_announce_[300]{};
@@ -207,15 +247,18 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   int16_t bridge_resample_buf_[BRIDGE_RESAMPLE_MAX_FRAMES * 2]{};
 
   // Runtime diagnostics (written on Core 0, reported/reset on Core 1)
-  volatile uint32_t diag_pcm_callbacks_{0};
-  volatile uint32_t diag_pcm_bytes_{0};
-  volatile uint32_t diag_i2s0_timeouts_{0};
-  volatile uint32_t diag_i2s0_errors_{0};
-  volatile uint32_t diag_bridge_timeouts_{0};
-  volatile uint32_t diag_bridge_errors_{0};
-  volatile uint32_t diag_bridge_short_writes_{0};
+  std::atomic<uint32_t> diag_pcm_callbacks_{0};
+  std::atomic<uint32_t> diag_pcm_bytes_{0};
+  std::atomic<uint32_t> diag_i2s0_bytes_{0};
+  std::atomic<uint32_t> diag_announce_bytes_{0};
+  std::atomic<uint32_t> diag_out_peak_{0};
+  std::atomic<uint32_t> diag_i2s0_timeouts_{0};
+  std::atomic<uint32_t> diag_i2s0_errors_{0};
+  std::atomic<uint32_t> diag_bridge_timeouts_{0};
+  std::atomic<uint32_t> diag_bridge_errors_{0};
+  std::atomic<uint32_t> diag_bridge_short_writes_{0};
   // Counts I2S0 writes that didn't drain the full buffer (DMA back-pressure).
-  volatile uint32_t diag_i2s0_short_writes_{0};
+  std::atomic<uint32_t> diag_i2s0_short_writes_{0};
   unsigned long diag_last_report_ms_{0};
 
   // Pin configuration
@@ -289,6 +332,8 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
 
   // Optional HA entity references
   text_sensor::TextSensor *now_playing_sensor_{nullptr};
+  text_sensor::TextSensor *playback_phase_sensor_{nullptr};
+  const char *last_playback_phase_{nullptr};
   select::Select *station_select_{nullptr};
 };
 

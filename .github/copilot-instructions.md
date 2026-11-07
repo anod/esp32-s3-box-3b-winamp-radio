@@ -22,6 +22,15 @@ ESPHome-based internet radio for the ESP32-S3-BOX-3. Uses ESP-IDF framework with
 
 ## ESPHome Architecture
 
+### Development builds
+
+- Compile radio development sources in the existing Home Assistant ESPHome Device Builder
+  on Proxmox VM 100, not on the development PC: `python3 tools/ha_build.py compile`.
+- The tool syncs uncommitted YAML/components privately, uses local external components,
+  and leaves the existing HA radio config and secrets unchanged.
+- Keep ESPHome 2026.10.2 and native ESP-IDF 6.0.1 for the current milestone.
+  Do not flash, restart HA, or change USB passthrough without user permission.
+
 ### Component Layout
 
 ```
@@ -53,7 +62,7 @@ components/
 
 - **Core 0**: ESP-GMF worker thread — runs HTTP fetch, decoder, and calls our PCM output + HTTP event callbacks
 - **Core 1**: ESPHome main loop — UI rendering (~15fps), touch input, WiFi, HA API, player control
-- **Control flow**: Core 1 calls `esp_audio_simple_player_play/stop/pause/resume()` directly — ESP-GMF API is thread-safe
+- **Control flow**: Core 1 posts coalesced commands to a Core 0 control worker (priority 6). Only that worker calls blocking GMF stop/run/pause/resume. Teardown callbacks/PCM are fenced; discarded PCM yields so decoder priority 5 cannot starve control or idle tasks. Never restore blocking player calls to the main loop.
 - **Callbacks on Core 0**: `pcm_output_cb_` (volume scaling, I2S write, FFT feed), `http_event_cb_` (ICY metadata), `player_event_cb_` (state changes, sample rate detection)
 
 ### Cross-Core Communication
@@ -76,6 +85,9 @@ Split across two cores for zero audio-path overhead:
 ### Software Volume
 
 - UI volume: 22 discrete steps (0–21), stored in NVS
+- Mute is independent of volume in HA and touch controls. Changing volume does not
+  unmute; volume zero is silent without setting mute. Radio mute uses software gain,
+  leaving fixed-level internal-speaker voice replies and cues audible.
 - Internal: Q8 fixed-point gain (`sw_vol_gain_`) applied in `pcm_output_cb_` to PCM samples before I2S write
 - Perceptual curve is capped at unity gain to avoid clipping hot streams; the top steps approach Q8 unity (`256`) without software boost. The ES8311 analog output still provides speaker gain.
 - Pre-computed lookup table `VOL_Q8[22]` — no floating-point math in audio path
@@ -103,7 +115,9 @@ Components initialize in order: InternetRadio (`LATE`) → I2SBridge (`LATE - 1`
 - **Voice session flow**: `voice_capture_begin()` stops the radio (without touching the NVS resume flag), clocks I2S0 to 16k, enables RX. TTS arrives as `play_media` with `announcement=true` → `announcing_`, state published as `ANNOUNCING`; FINISHED/STOPPED while announcing does NOT set `stream_failed_`. YAML `on_end` waits for `not announcing`, then `voice_session_end()` → `restore_after_voice_()` reconnects the station if it was playing. Watchdog is suspended during voice/announcement.
 - **Session safety rules**: a new `voice_capture_begin()` cancels any pending restore; restore runs only when not announcing, no queued announcement, `mic_requested_` false and RX disabled. Standalone announcements (`assist_satellite.announce`, preannounce + ENQUEUE) act as mini sessions and resume the radio afterwards. `connect_station_()`, stream retry and auto-play are deferred while `voice_active_`. `reconfig_sample_rate_` and RX enable/disable are serialized by `i2s_cfg_mutex_`. YAML has a 30s `wait_until` timeout, a 300ms follow-up grace in `on_end` and a 2s `interval` safety net calling `voice_session_end()`; C++ requires the end request to be ≥500ms old before restoring. `play_media` during a session is deferred (`pending_media_`); STOP/PAUSE/TURN_OFF cancel the resume. A stalled announcement (10s without frames) is aborted. `ESP_ASP_STATE_STOPPED` does NOT clear `announcing_` (only FINISHED/ERROR or explicit Core 1 stops do). Replies use a fixed gain (`VOICE_REPLY_GAIN_Q8`), go only to the internal speaker (PA forced on), never to the BT bridge.
 - Announcement format advertised: stereo MP3 @44.1k with `sample_bytes=0` (PCM path is stereo-only, resampler disabled). Do NOT advertise `sample_bytes=2` with mp3: HA's ffmpeg then fails (`libmp3lame: sample format s16 not supported`) and `tts_proxy` returns HTTP 500 → silent reply.
-- **Async player stop**: `esp_audio_simple_player_stop` can block ~3s (HTTP teardown). `voice_capture_begin()` pauses the player (silences TX) and stops it on a `va_stop` task (`stop_state_`); it returns 1 ok, 0 fail, -1 = still stopping (Box3Mic retries next loop). `play_uri_`/`connect_station_` call `wait_stop_done_()` first. YAML calls `display.set_voice_state(1)` on trigger so the listening screen shows in ~0.2s.
+- **Async player control**: `esp_audio_simple_player_stop` can block seconds (HTTP teardown). All stop/start/pause/resume operations run on `radio_control`, with a one-entry latest-request mailbox and generation fencing. `voice_capture_begin()` returns -1 while stopping; RX re-clocking waits for completion. A 10s control timeout quarantines output until the worker returns; never silently continue after a timeout or kill a library task. Standalone announcements wait for the wake capture task to release RX. A 20s startup deadline requires actual I2S PCM and is stamped by the worker at launch (`playback_launched_`), never at enqueue. STOP/RUN bump `stream_epoch_`; `http_event_cb_` fences every hook against it (return -1 ⇒ GMF's reconnect fails at PRE_REQUEST, IO aborts the data bus, the pipeline stops itself), and `http_read_` polls in 200 ms slices so a dribbling server can't block teardown — do NOT "fix" stalls by raising timeouts or auto-restarting. A failed PAUSE/RESUME triggers an explicit cleanup STOP inside the same worker command. Never issue two waited GMF stops back to back (`PipelineStopTracker`): the priority-6 worker wakes on `STOP_BIT` before the priority-5 GMF thread clears its RUNNING action, so an immediate second stop (e.g. a RUN superseded during teardown) waits forever. PAUSE clears `playback_requested_`, so a paused radio is not resumed after voice/announcements. Validate with `tools/hardware_validate.py --scenario lifecycle` (slow + invalid streams) and the full-log event counters. YAML calls `display.set_voice_state(1)` immediately on trigger.
+- **AAC memory**: The codec's weak `media_lib_module_*` hooks are overridden in `codec_memory.cpp` to allocate CPU-only workspaces in PSRAM; the explicit `initialize_codec_memory()` anchor is required to retain this archive member. Linked-ELF tests must confirm strong (`T`) overrides. TLS also uses PSRAM. Do not move DMA buffers there. The measured AAC workspace is 35,460 bytes; failures occurred with a 31,744-byte largest internal block even with 72KB free.
+- **Playback truth**: Only actual I2S0 writes enter PLAYING. `Audio diag` has decoded and written bytes; counters use atomic exchanges. The public Playback Phase sensor exposes announcement/connecting/control-timeout states because pinned ESPHome 2026.10.2 maps ANNOUNCING to PLAYING on the native API.
 - **Display during voice**: auto-dim is suppressed while `voice_state_ != IDLE` (the paused radio would otherwise look "stopped"). The reply stays up for 4s + 40ms/byte (cap 15s) via `voice_hold_`; errors expire after 4s; a new `set_voice_state` cancels the hold.
 - **Audible voice cues**: `on_listening` requests a rising 120 ms chime when the assistant is ready for speech, not when the starting screen appears; `on_error` requests a falling 200 ms tone via `play_voice_cue(error)`. Cues do not wait for HTTP/player teardown. PCM is synthesized on a short-lived task, at a fixed level, on the internal speaker only (also with BT enabled). The task shares `i2s_cfg_mutex_` with re-clocking and PCM writes; internal player output is ducked while the cue drains. Radio restore waits for pending/active cues. No media files or network requests are needed.
 - **Full-screen voice view**: while `voice_state_ != IDLE`, `draw_frame_()` draws `draw_voice_view_()` into the SAME PSRAM canvas (no extra sprites, so switching is the next frame). With no text yet, a big mic (1.5x) is centered with the state label and, while LISTENING, a live mic meter (`voice_logic::g_mic_peak` envelope written by the Box3Mic task, `level_pct()` log scale). Exactly-zero samples for 2.5s show "MIC MUTED?" (GPIO1 hardware mute). Once text arrives the icon shrinks to the top (state label top-left), recognized text (dim) + reply (white) below. Per-state animation: rings / spinner / equalizer / error slash. The bottom strip (ticker sprite) continues the voice background and frame (drawn directly on the panel).

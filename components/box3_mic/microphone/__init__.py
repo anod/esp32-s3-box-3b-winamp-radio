@@ -10,7 +10,7 @@ from esphome.const import CONF_CHANNEL, CONF_ID
 from esphome.components.box3_mic import box3_mic_ns
 
 CODEOWNERS = ["@alexg"]
-DEPENDENCIES = ["network"]
+DEPENDENCIES = ["media_player", "i2c"]
 
 CONF_RADIO_ID = "radio_id"
 CONF_WAKE_MODE = "wake_mode"
@@ -45,6 +45,8 @@ CONFIG_SCHEMA = cv.All(
         }
     ).extend(cv.COMPONENT_SCHEMA),
     _set_stream_limits,
+    cv.only_on_esp32,
+    cv.only_with_framework("esp-idf"),
 )
 
 

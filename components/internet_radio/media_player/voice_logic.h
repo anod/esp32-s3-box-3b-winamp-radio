@@ -14,6 +14,10 @@ namespace voice_logic {
 // read by the display). Exactly 0 means the mic delivers digital silence (hardware mute).
 inline volatile int g_mic_peak = 0;
 
+inline int playback_gain(int volume_gain, bool muted, bool announcing, int reply_gain) {
+  return announcing ? reply_gain : (muted ? 0 : volume_gain);
+}
+
 // Two notes with a 5 ms fade at each edge, generated rather than stored as audio.
 inline int16_t cue_sample(uint32_t frame, uint32_t rate, bool error) {
   const uint32_t note_frames = rate * (error ? 100 : 60) / 1000;
@@ -51,6 +55,16 @@ inline void apply_gain_q8(int16_t *samples, size_t count, int gain) {
     if (s < INT16_MIN) s = INT16_MIN;
     samples[i] = (int16_t) s;
   }
+}
+
+inline uint32_t peak_abs(const int16_t *samples, size_t count) {
+  uint32_t peak = 0;
+  for (size_t i = 0; i < count; i++) {
+    const int32_t v = samples[i];
+    const uint32_t a = v < 0 ? uint32_t(-v) : uint32_t(v);
+    if (a > peak) peak = a;
+  }
+  return peak;
 }
 
 // Extract one channel (0 = left, 1 = right) from interleaved stereo frames.

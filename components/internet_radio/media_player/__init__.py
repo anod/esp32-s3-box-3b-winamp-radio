@@ -6,8 +6,9 @@ from esphome.components import media_player, esp32, text_sensor, select
 from esphome.const import CONF_ID
 from esphome.components.internet_radio import internet_radio_ns
 from esphome.components.esp32 import add_idf_component
+from esphome import pins
 
-DEPENDENCIES = ["network"]
+DEPENDENCIES = ["network", "i2c"]
 
 InternetRadio = internet_radio_ns.class_(
     "InternetRadio", media_player.MediaPlayer, cg.Component
@@ -22,23 +23,27 @@ CONF_PA_PIN = "pa_pin"
 CONF_DEFAULT_VOLUME = "default_volume"
 CONF_NOW_PLAYING = "now_playing_id"
 CONF_STATION_SELECT = "station_select_id"
+CONF_PLAYBACK_PHASE = "playback_phase_id"
 
-CONFIG_SCHEMA = (
+CONFIG_SCHEMA = cv.All(
     media_player.media_player_schema(InternetRadio)
     .extend(
         {
-            cv.Required(CONF_I2S_BCLK_PIN): cv.int_range(min=0, max=48),
-            cv.Required(CONF_I2S_LRCLK_PIN): cv.int_range(min=0, max=48),
-            cv.Required(CONF_I2S_DOUT_PIN): cv.int_range(min=0, max=48),
-            cv.Optional(CONF_I2S_DIN_PIN, default=16): cv.int_range(min=0, max=48),
-            cv.Optional(CONF_I2S_MCLK_PIN, default=2): cv.int_range(min=0, max=48),
-            cv.Optional(CONF_PA_PIN, default=-1): cv.int_range(min=-1, max=48),
+            cv.Required(CONF_I2S_BCLK_PIN): pins.internal_gpio_output_pin_number,
+            cv.Required(CONF_I2S_LRCLK_PIN): pins.internal_gpio_output_pin_number,
+            cv.Required(CONF_I2S_DOUT_PIN): pins.internal_gpio_output_pin_number,
+            cv.Optional(CONF_I2S_DIN_PIN, default=16): pins.internal_gpio_input_pin_number,
+            cv.Optional(CONF_I2S_MCLK_PIN, default=2): pins.internal_gpio_output_pin_number,
+            cv.Optional(CONF_PA_PIN, default=-1): cv.Any(-1, pins.internal_gpio_output_pin_number),
             cv.Optional(CONF_DEFAULT_VOLUME, default=15): cv.int_range(min=0, max=21),
             cv.Optional(CONF_NOW_PLAYING): cv.use_id(text_sensor.TextSensor),
             cv.Optional(CONF_STATION_SELECT): cv.use_id(select.Select),
+            cv.Optional(CONF_PLAYBACK_PHASE): cv.use_id(text_sensor.TextSensor),
         }
     )
-    .extend(cv.COMPONENT_SCHEMA)
+    .extend(cv.COMPONENT_SCHEMA),
+    cv.only_on_esp32,
+    cv.only_with_framework("esp-idf"),
 )
 
 
@@ -72,3 +77,7 @@ async def to_code(config):
     if CONF_STATION_SELECT in config:
         sel = await cg.get_variable(config[CONF_STATION_SELECT])
         cg.add(var.set_station_select(sel))
+
+    if CONF_PLAYBACK_PHASE in config:
+        sensor = await cg.get_variable(config[CONF_PLAYBACK_PHASE])
+        cg.add(var.set_playback_phase_sensor(sensor))

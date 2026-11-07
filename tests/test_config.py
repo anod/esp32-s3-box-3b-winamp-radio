@@ -21,7 +21,7 @@ def local_yaml(text):
         text,
         flags=re.S,
     )
-    return re.sub(r"min_version: [\d.]+", "min_version: 2026.10.2", text)
+    return text
 
 
 def run_config(text):
@@ -72,6 +72,30 @@ class ConfigTests(unittest.TestCase):
     def test_din_pin_range(self):
         rc, out = run_config(self.base.replace("i2s_din_pin: 16", "i2s_din_pin: 99"))
         self.assertNotEqual(rc, 0)
+
+    def test_invalid_s3_gpio_rejected(self):
+        rc, out = run_config(self.base.replace("i2s_dout_pin: 15", "i2s_dout_pin: 25"))
+        self.assertNotEqual(rc, 0)
+        self.assertIn("25", out)
+
+    def test_arduino_framework_rejected(self):
+        text = self.base.replace("type: esp-idf\n    version: 6.0.1", "type: arduino")
+        rc, out = run_config(text)
+        self.assertNotEqual(rc, 0)
+
+    def test_standard_station_commands(self):
+        self.assertIn("media_player.next: radio", self.base)
+        self.assertIn("media_player.previous: radio", self.base)
+
+    def test_audio_pin_conflict_rejected(self):
+        rc, out = run_config(self.base.replace("    bclk_pin: 10", "    bclk_pin: 17"))
+        self.assertNotEqual(rc, 0)
+        self.assertIn("Pin 17 is used in multiple places", out)
+
+    def test_shared_amplifier_requires_explicit_permission(self):
+        rc, out = run_config(self.base.replace("      allow_other_uses: true\n", ""))
+        self.assertNotEqual(rc, 0)
+        self.assertIn("Pin 46 is used in multiple places", out)
 
     def test_unknown_radio_reference(self):
         rc, out = run_config(self.base.replace("    radio_id: radio\n    channel", "    radio_id: nope\n    channel"))

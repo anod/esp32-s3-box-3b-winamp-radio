@@ -126,8 +126,10 @@ void Box3Mic::loop() {
         this->task_done_ = true;
         rx_busy_ = false;
         this->radio_->voice_capture_end();
-        this->radio_->voice_mic_requested(false);
-        this->radio_->voice_session_end();
+        if (!this->wake_mode_) {
+          this->radio_->voice_mic_requested(false);
+          this->radio_->voice_session_end();
+        }
         this->want_run_ = false;
         this->state_ = microphone::STATE_STOPPED;
         break;
@@ -138,6 +140,11 @@ void Box3Mic::loop() {
     }
 
     case microphone::STATE_RUNNING: {
+      if (this->wake_mode_ && this->radio_->is_voice_active()) {
+        this->task_stop_ = true;
+        this->state_ = microphone::STATE_STOPPING;
+        break;
+      }
       static std::vector<uint8_t> chunk;
       chunk.resize(1024);
       // Bounded drain per loop pass so a backlog can't starve the main loop

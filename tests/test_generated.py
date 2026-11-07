@@ -12,7 +12,8 @@ import unittest
 
 from test_config import ROOT, MAIN_YAML, local_yaml
 
-BUILD = os.path.join(ROOT, ".esphome", "build", "esp32radio")
+BUILD = os.environ.get("ESP32RADIO_TEST_BUILD_DIR",
+                       os.path.join(ROOT, ".esphome", "build", "esp32radio"))
 MAIN_CPP = os.path.join(BUILD, "src", "main.cpp")
 NATIVE_BUILD = os.path.join(BUILD, "build")
 NATIVE_ELF = os.path.join(NATIVE_BUILD, "esp32radio.elf")
@@ -47,6 +48,10 @@ def toolchain(tool):
 class GeneratedCodeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        if os.environ.get("ESP32RADIO_TEST_BUILD_DIR"):
+            with open(MAIN_CPP) as f:
+                cls.cpp = f.read()
+            return
         tmp = os.path.join(ROOT, "_tmp_test_generated.yaml")
         with open(MAIN_YAML) as f, open(tmp, "w") as out:
             out.write(local_yaml(f.read()))
@@ -64,8 +69,21 @@ class GeneratedCodeTests(unittest.TestCase):
         self.assertIn("box3_microphone->set_radio(radio);", self.cpp)
         self.assertIn("box3_microphone->set_use_right_channel(false);", self.cpp)
 
+    def test_playback_phase_is_exposed(self):
+        self.assertIn("radio->set_playback_phase_sensor(playback_phase);", self.cpp)
+
     def test_din_pin(self):
         self.assertIn("radio->set_i2s_din_pin(16);", self.cpp)
+
+    def test_audio_output_pins_preserved(self):
+        for setter, pin in (("bclk", 17), ("lrclk", 45), ("dout", 15), ("mclk", 2)):
+            self.assertIn(f"radio->set_i2s_{setter}_pin({pin});", self.cpp)
+        self.assertIn("radio->set_pa_pin(46);", self.cpp)
+        self.assertIn("bt_speaker->set_pa_pin(46);", self.cpp)
+
+    def test_display_standard_controls_wired(self):
+        self.assertIn("display->set_media_player(radio);", self.cpp)
+        self.assertIn("display->set_bridge(bt_speaker);", self.cpp)
 
     def test_radio_session_hooks_called(self):
         # on_end, on_error and the interval safety net all end the session
@@ -113,6 +131,14 @@ class GeneratedCodeTests(unittest.TestCase):
 
 @unittest.skipUnless(os.path.exists(ELF) and toolchain("gcc-nm"), "no built firmware.elf / toolchain")
 class FirmwareImageTests(unittest.TestCase):
+    def test_codec_memory_overrides_are_strong(self):
+        symbols = subprocess.check_output([toolchain("gcc-nm"), ELF], text=True)
+        bindings = {line.split()[-1]: line.split()[-2] for line in symbols.splitlines()
+                    if len(line.split()) >= 3}
+        for name in ("media_lib_module_malloc", "media_lib_module_calloc", "media_lib_module_realloc"):
+            self.assertEqual(bindings.get(name), "T", f"{name} must bind the PSRAM override")
+
+    maxDiff = 2000
     @classmethod
     def setUpClass(cls):
         cls.syms = subprocess.run([toolchain("gcc-nm"), "-C", ELF], capture_output=True, text=True).stdout
@@ -138,12 +164,20 @@ class FirmwareImageTests(unittest.TestCase):
     def test_sdkconfig_workarounds(self):
         with open(SDKCONFIG) as f:
             cfg = f.read()
-        self.assertIn("# CONFIG_ESP_AUDIO_SIMPLE_PLAYER_HTTP_EN is not set", cfg)
-        self.assertIn("CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y", cfg)
-        self.assertIn("# CONFIG_ESP_AUDIO_SIMPLE_PLAYER_RESAMPLE_EN is not set", cfg)
-        self.assertIn("CONFIG_ESP_HTTP_CLIENT_SAVE_RESPONSE_HEADERS=y", cfg)
-        self.assertIn("CONFIG_ESP_HTTP_CLIENT_MAX_SAVED_RESPONSE_HEADERS=20", cfg)
-        self.assertIn("CONFIG_LIBC_NEWLIB=y", cfg)
+        options = set(cfg.splitlines())
+        for expected in (
+            "# CONFIG_ESP_AUDIO_SIMPLE_PLAYER_HTTP_EN is not set",
+            "# CONFIG_ESP_AUDIO_SIMPLE_PLAYER_RESAMPLE_EN is not set",
+            "# CONFIG_ESP_AUDIO_SIMPLE_PLAYER_FILE_EN is not set",
+            "# CONFIG_ESP_AUDIO_SIMPLE_PLAYER_EMBED_FLASH_EN is not set",
+            "CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y",
+            "CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y",
+            "# CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC is not set",
+            "CONFIG_ESP_HTTP_CLIENT_SAVE_RESPONSE_HEADERS=y",
+            "CONFIG_ESP_HTTP_CLIENT_MAX_SAVED_RESPONSE_HEADERS=20",
+            "CONFIG_LIBC_NEWLIB=y",
+        ):
+            self.assertTrue(expected in options, f"Missing SDK option: {expected}")
 
 
 if __name__ == "__main__":

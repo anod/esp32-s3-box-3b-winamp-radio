@@ -3,10 +3,10 @@ import esphome.config_validation as cv
 from esphome import automation
 from esphome.const import CONF_ID, CONF_TRIGGER_ID
 from esphome.components.esp32 import include_builtin_idf_component
-from esphome.components import i2c, number
+from esphome.components import i2c, number, switch
 
 CODEOWNERS = ["@alexg"]
-DEPENDENCIES = ["i2c"]
+DEPENDENCIES = ["i2c", "media_player", "switch"]
 
 winamp_display_ns = cg.esphome_ns.namespace("winamp_display")
 WinampDisplay = winamp_display_ns.class_(
@@ -27,15 +27,12 @@ CONF_BRIGHTNESS_NUMBER = "brightness_number_id"
 internet_radio_ns = cg.esphome_ns.namespace("internet_radio")
 InternetRadio = internet_radio_ns.class_("InternetRadio")
 
-i2s_bridge_ns = cg.esphome_ns.namespace("i2s_bridge")
-I2SBridge = i2s_bridge_ns.class_("I2SBridge")
-
 CONFIG_SCHEMA = (
     cv.Schema(
         {
             cv.GenerateID(): cv.declare_id(WinampDisplay),
             cv.Required(CONF_RADIO_ID): cv.use_id(InternetRadio),
-            cv.Required(CONF_BRIDGE_ID): cv.use_id(I2SBridge),
+            cv.Required(CONF_BRIDGE_ID): cv.use_id(switch.Switch),
             cv.Optional(CONF_BRIGHTNESS, default=160): cv.int_range(min=1, max=255),
             cv.Optional(CONF_BRIGHTNESS_NUMBER): cv.use_id(number.Number),
             cv.Optional(CONF_ON_HOME_BUTTON): automation.validate_automation(
@@ -55,6 +52,7 @@ async def to_code(config):
 
     radio = await cg.get_variable(config[CONF_RADIO_ID])
     cg.add(var.set_radio(radio))
+    cg.add(var.set_media_player(radio))
 
     bridge = await cg.get_variable(config[CONF_BRIDGE_ID])
     cg.add(var.set_bridge(bridge))

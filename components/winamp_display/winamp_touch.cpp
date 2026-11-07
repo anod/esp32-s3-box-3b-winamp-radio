@@ -1,6 +1,5 @@
 #include "winamp_display.h"
 #include "esphome/components/internet_radio/media_player/internet_radio.h"
-#include "esphome/components/i2s_bridge/switch/i2s_bridge.h"
 
 namespace esphome {
 namespace winamp_display {
@@ -111,8 +110,8 @@ void WinampDisplay::handle_touch_() {
     int new_vol = ((clamped_x - bar_x) * max_vol + bar_w / 2) / bar_w;
     if (new_vol < 0) new_vol = 0;
     if (new_vol > max_vol) new_vol = max_vol;
-    if (this->radio_) {
-      this->radio_->set_volume_direct(new_vol);
+    if (this->player_) {
+      this->player_->make_call().set_volume(float(new_vol) / max_vol).perform();
     }
     this->touch_highlight_ = 3;
     this->touch_hl_ms_ = millis();
@@ -121,25 +120,24 @@ void WinampDisplay::handle_touch_() {
 
   // Volume buttons: [ - ] [ MUTE ] [ + ] at vy+34
   if (tx > RPANEL_X && ty >= vy + 30 && ty <= vy + 54) {
-    int vol = this->radio_ ? this->radio_->get_vol() : 0;
+    int vol = this->player_ ? int(this->player_->volume * max_vol + 0.5f) : 0;
     if (tx < RPANEL_X + 39 && vol > 0) {
       // Volume down
-      if (this->radio_) this->radio_->set_volume_direct(vol - 1);
+      if (this->player_) this->player_->make_call().set_command(media_player::MEDIA_PLAYER_COMMAND_VOLUME_DOWN).perform();
       this->touch_highlight_ = 0;
       this->touch_hl_ms_ = millis();
     } else if (tx >= RPANEL_X + 39 && tx < RPANEL_X + 77) {
       // Mute toggle — use is_muted() not vol to handle HA-initiated mutes
-      if (this->radio_ && !this->radio_->is_muted()) {
-        this->saved_vol_ = this->radio_->get_vol();
-        this->radio_->set_volume_direct(0);
-      } else if (this->radio_) {
-        this->radio_->set_volume_direct(this->saved_vol_);
+      if (this->player_ && !this->player_->is_muted()) {
+        this->player_->make_call().set_command(media_player::MEDIA_PLAYER_COMMAND_MUTE).perform();
+      } else if (this->player_) {
+        this->player_->make_call().set_command(media_player::MEDIA_PLAYER_COMMAND_UNMUTE).perform();
       }
       this->touch_highlight_ = 1;
       this->touch_hl_ms_ = millis();
     } else if (tx >= RPANEL_X + 77 && vol < max_vol) {
       // Volume up
-      if (this->radio_) this->radio_->set_volume_direct(vol + 1);
+      if (this->player_) this->player_->make_call().set_command(media_player::MEDIA_PLAYER_COMMAND_VOLUME_UP).perform();
       this->touch_highlight_ = 2;
       this->touch_hl_ms_ = millis();
     }
@@ -151,7 +149,7 @@ void WinampDisplay::handle_touch_() {
   int bty = by + 18;
   if (tx >= RPANEL_X && tx <= RPANEL_X + RPANEL_W && ty >= bty - 6 && ty <= bty + 24) {
     if (this->bridge_) {
-      bool active = i2s_bridge::I2SBridge::is_active();
+      bool active = this->bridge_->state;
       if (active) {
         this->bridge_->turn_off();
       } else {

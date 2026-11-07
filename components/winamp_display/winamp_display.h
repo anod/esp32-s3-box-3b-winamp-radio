@@ -14,6 +14,8 @@
 #include "esphome/core/preferences.h"
 #include "esphome/components/i2c/i2c.h"
 #include "esphome/components/number/number.h"
+#include "esphome/components/media_player/media_player.h"
+#include "esphome/components/switch/switch.h"
 
 #include <LovyanGFX.hpp>
 
@@ -68,9 +70,6 @@ namespace esphome {
 namespace internet_radio {
 class InternetRadio;
 }
-namespace i2s_bridge {
-class I2SBridge;
-}
 }  // namespace esphome
 
 namespace esphome {
@@ -87,7 +86,8 @@ class WinampDisplay final : public Component, public i2c::I2CDevice {
 
   // Config setters (called by codegen)
   void set_radio(internet_radio::InternetRadio *radio) { this->radio_ = radio; }
-  void set_bridge(i2s_bridge::I2SBridge *bridge) { this->bridge_ = bridge; }
+  void set_media_player(media_player::MediaPlayer *player) { this->player_ = player; }
+  void set_bridge(switch_::Switch *bridge) { this->bridge_ = bridge; }
   // Voice assistant status (called from YAML on Core 1, same thread as drawing)
   enum VoiceState : uint8_t {
     VOICE_IDLE = 0, VOICE_LOADING, VOICE_LISTENING, VOICE_THINKING, VOICE_REPLYING, VOICE_ERROR
@@ -169,7 +169,8 @@ class WinampDisplay final : public Component, public i2c::I2CDevice {
 
   // Component references
   internet_radio::InternetRadio *radio_{nullptr};
-  i2s_bridge::I2SBridge *bridge_{nullptr};
+  media_player::MediaPlayer *player_{nullptr};
+  switch_::Switch *bridge_{nullptr};
   number::Number *brightness_number_{nullptr};
 
   // Display
@@ -285,7 +286,6 @@ class WinampDisplay final : public Component, public i2c::I2CDevice {
   int touch_highlight_{-1};
   unsigned long touch_hl_ms_{0};
   unsigned long last_touch_ms_{0};
-  int saved_vol_{15};
   bool touch_detected_{false};
   int touch_x_{0};
   int touch_y_{0};

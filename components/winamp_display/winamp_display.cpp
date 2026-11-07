@@ -386,9 +386,9 @@ void WinampDisplay::loop() {
 
   // Auto-dim when stopped, but never during a voice session (the radio is
   // paused for it, which would otherwise dim the screen).
-  if (this->radio_) {
-    int ps = static_cast<int>(this->radio_->get_play_state());
-    bool dim = ps == static_cast<int>(internet_radio::PS_STOPPED) && this->voice_state_ == VOICE_IDLE;
+  if (this->player_) {
+    int ps = static_cast<int>(this->player_->state);
+    bool dim = ps == static_cast<int>(media_player::MEDIA_PLAYER_STATE_IDLE) && this->voice_state_ == VOICE_IDLE;
     if (ps != this->prev_play_state_ || dim != this->dimmed_) {
       if (this->screen_on_ && dim != this->dimmed_)
         this->tft_.setBrightness(dim ? DIM_BRIGHTNESS : this->brightness_);
@@ -453,11 +453,11 @@ void WinampDisplay::draw_frame_() {
   // Read state from InternetRadio
   int current_station = this->radio_ ? this->radio_->get_current_station() : 0;
   int num_stations = internet_radio::InternetRadio::get_num_stations();
-  int vol = this->radio_ ? this->radio_->get_vol() : 0;
   int max_vol = internet_radio::InternetRadio::get_max_volume();
-  bool muted = this->radio_ ? this->radio_->is_muted() : false;
+  int vol = this->player_ ? int(this->player_->volume * max_vol + 0.5f) : 0;
+  bool muted = this->player_ ? this->player_->is_muted() : false;
   long bitrate = this->radio_ ? this->radio_->get_bitrate() : 0;
-  bool bt_mode = i2s_bridge::I2SBridge::is_active();
+  bool bt_mode = this->bridge_ && this->bridge_->state;
 
   // WiFi state from ESPHome
   bool wifi_connected = network::is_connected();

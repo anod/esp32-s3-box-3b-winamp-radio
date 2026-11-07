@@ -25,10 +25,13 @@ Internet radio for the [ESP32-S3-BOX-3](https://github.com/espressif/esp-box) bu
 pip install "esphome==2026.10.2"
 ```
 
+Use the same ESPHome 2026.10.2 environment for configuration, compilation,
+upload and tests (`esphome version`). The radio uses native ESP-IDF 6.0.1;
+PlatformIO is only required for the separate BT bridge firmware.
+
 ### 2. Configure Secrets
 
 ```bash
-cd esphome
 cp secrets.yaml.sample secrets.yaml  # edit with your WiFi/API credentials
 ```
 
@@ -36,19 +39,130 @@ cp secrets.yaml.sample secrets.yaml  # edit with your WiFi/API credentials
 ```yaml
 wifi_ssid: "YourSSID"
 wifi_password: "YourPassword"
-api_key: "your-api-encryption-key"
-ota_password: "your-ota-password"
+esp32radio_api_key: "your-api-encryption-key"
+esp32radio_ota_password: "your-ota-password"
 ```
 
 ### 3. Build & Flash
 
+Development builds run in the existing **ESPHome Device Builder on Home Assistant
+VM 100 (`192.168.1.10`) on Proxmox**, not on the development PC:
+
 ```bash
-cd esphome
+python3 tools/ha_build.py sync       # copy current YAML and components, no build
+python3 tools/ha_build.py compile    # sync, then compile remotely; never flash
+python3 tools/ha_build.py verify     # test matching HA-generated C++ and ELF/bin
+python3 tools/ha_build.py status     # remote snapshot checksum and build log
+```
+
+`verify` refuses mismatched source checksums or skipped artifact tests. It runs
+against the HA-generated code and linked firmware, without compiling locally.
+The compile helper also reapplies requested SDK options if the initial native
+configure discarded them before downloading GMF dependencies.
+
+This requires SSH access through the `proxmox` alias and the HA VM's existing
+QEMU guest agent. Defaults target container `app_5c53de3b_esphome`; use `--host`,
+`--vm` and `--container` if the installation changes. The tool checks for
+ESPHome 2026.10.2, uses one compile job with reduced priority, and refuses to
+start with less than 1.5 GiB available in the HA VM. It does not restart HA,
+change add-on versions or configure USB passthrough. Compilation never installs
+firmware; the separate `upload` action requires explicit OTA authorization.
+
+The separate `esp32radio-development.yaml` appears in Device Builder. It includes
+a checksummed source snapshot under `/config/esphome/radio-development/`, using
+**local external components** so both uncommitted YAML and C++/Python changes are
+built without committing or pushing. Existing `esp32radio.yaml` remains unchanged
+and continues to build GitHub `main`. Local secrets and build caches are never
+copied: the development snapshot uses HA's existing `secrets.yaml`.
+
+Each successful compile prints the OTA artifact path, size and SHA256. Build
+output stays in `/config/esphome/radio-development/compile.log`; native artifacts
+are under `/data/esp32radio-development-build`. Old source snapshots are retained
+for inspection. Sync is refused during a managed compile; do not edit or install
+the managed development config through the dashboard while a build is running.
+
+After reviewing the result, explicitly choose **Install wirelessly** on the
+development entry when you want to flash it. Wi-Fi OTA works with the radio
+remaining in place; connecting USB to Proxmox does not speed compilation.
+Device Builder's wireless logs use ESPHome's API and cannot capture the earliest
+boot messages or crashes before networking starts. Genuine serial boot/crash
+logs require USB connected to a host, with passthrough to VM 100 if using HA.
+
+For an authorized, checksum-guarded OTA followed by bounded hardware regression:
+
+```bash
+python3 tools/ha_build.py compile
+python3 tools/ha_build.py verify
+python3 tools/ha_build.py upload --device 192.168.1.107
+python3 tools/hardware_validate.py --stage regression --scenario all \
+  --report .esphome/hardware/regression.json
+python3 tools/hardware_validate.py --stage soak --scenario soak --soak-minutes 30 \
+  --transitions 20 --dwell 60 --report .esphome/hardware/soak.json
+```
+
+Use a Python environment with ESPHome's `aioesphomeapi` and PyYAML installed.
+The runner checks source/build/upload digests and the device's compilation time,
+records original station/volume/mute/BT state, and restores it on exit. It expects
+the radio initially playing and exercises pause/stop/resume, HTTPS AAC, standalone
+and queued announcements, and the assistant session. API latency, actual PCM/I2S
+bytes, write errors, internal heap low-water/largest block, PSRAM and loop timing
+are saved with raw logs beside the JSON report. Lifecycle failures are counted
+over the whole log, not only inside sampled windows: any control timeout, player
+failure, allocation/decoder-memory failure or startup timeout other than the one
+deliberately injected fails the run. Sustained PCM means every settled one-second
+`Audio diag` bucket carries at least 80% of the nominal byte rate (the first bucket
+of each window may straddle a command); "PLAYING" without PCM is never accepted.
+Announcement PCM (`ann=`) and post-gain peak (`peak=`) are logged separately, so
+each announcement, both of two queued announcements, an announcement while the
+radio is muted (radio peak stays 0) and a paused radio staying silent after an
+announcement or a voice session are proven from output bytes. Bridge enable's
+two-second transition separately records the nonblocking bridge's startup
+backpressure, then requires clean settled writes. A connection loss fails rather
+than silently treating a reboot as recovery. Logs confirm PCM flow, **not audible
+fidelity or successful speech**; per-second counters cannot rule out sub-second
+underruns, so a listener's stutter report outranks clean counters.
+The quiet synthetic-tone server (`tools/ha_tone.py`, local `ffmpeg`, no HA
+restart) runs inside HA's container for a bounded lifetime and logs each request.
+`/tone.mp3` is a 3-second -30 dB tone; `/slow.mp3` sends headers and then one byte
+per second until the server expires, so the lifecycle scenario proves the 20-second
+startup deadline (measured from the actual launch), HTTP cancellation, a single
+connection closed by the device long before the server expires, and recovery
+within 15 seconds; `/invalid.mp3` is non-MP3 data that forces a decoder error and
+proves teardown and recovery. The soak scenario cycles AAC, MP3, announcement,
+superseded (PLAY during switch teardown), invalid-stream and stalled-startup
+transitions with a sustained-PCM dwell after each and reports the internal heap
+trend (free, low-water, largest block), loop timing, errors and resets. The
+first cycle is reported as a warm-up step; the leak check compares per-kind heap
+ceilings across the later cycles.
+Use `--scenario full`, `announcement`, `lifecycle`, `assistant` or `soak` for stage checks.
+
+For manual builds outside this remote development workflow:
+
+```bash
 esphome compile esp32radio.yaml                          # build
 esphome upload esp32radio.yaml --device /dev/ttyACM0     # flash via USB
 esphome upload esp32radio.yaml                           # flash via OTA (after first USB flash)
 esphome logs esp32radio.yaml --device /dev/ttyACM0       # serial logs
 ```
+
+Run commands from the repository root. To build pending local component changes,
+use a temporary configuration with `external_components` set to
+`source: {type: local, path: components}` instead of the Git source; retain the
+node name so build and upload use the same native build directory.
+
+Mute is independent of the 22-step volume setting: HA and touch mute preserve
+volume, changing volume does not unmute, and zero volume is silent without
+setting mute. Voice replies and cues retain their fixed internal-speaker level.
+Audio pins use ESPHome GPIO validation; the shared amplifier pin declares
+`allow_other_uses: true` in both components. LovyanGFX's autodetected display pins
+remain board-specific and are not registered by these audio schemas.
+
+The GMF engine still owns the shared speaker/microphone I2S bus, ICY/AAC decoding
+and BT PCM routing. Display volume, mute and playback state use the standard
+MediaPlayer interface, and its BT toggle uses the standard Switch interface;
+station selection and metadata still use the custom radio backend.
+These remain migration work before adopting ESPHome's
+standard audio sources; Sendspin is not enabled by this preparation.
 
 ## Testing with Copilot remote agent
 
@@ -84,6 +198,35 @@ In WSL, grant serial access once: `sudo usermod -aG dialout $USER` (re-login req
 DEBUG `Health` logs include internal heap free/minimum/largest block, free PSRAM,
 maximum main-loop time, and uptime every 5 seconds. The debug component also reports the
 reset reason. These sensors are internal and do not add Home Assistant entities.
+`Runtime diag` adds one-second radio-loop work/gap, control ownership and RX/voice
+state. `Audio diag` distinguishes decoded bytes from `written` I2S0 bytes.
+Allocation failures retain requested size/capabilities and internal fragmentation
+at the failure point. The public **Playback Phase** diagnostic distinguishes
+`connecting`, `playing`, `paused`, `announcing`, `voice`, `stopping`, `retrying`,
+`control_timeout` and `idle`. ESPHome 2026.10.2 deliberately maps ANNOUNCING to
+PLAYING on its native media-player API; use Playback Phase to distinguish them.
+PLAYING is entered only after PCM actually reaches I2S0, not when GMF accepts a URL.
+
+All player stop/start/pause/resume calls are serialized on a dedicated Core 0
+control worker. Superseded starts are discarded (without a second back-to-back GMF
+stop, which can deadlock GMF's task); teardown callbacks cannot finish
+a new announcement. A 10-second control deadline quarantines audio until the
+worker returns (it never starts another operation over a stuck worker), and a
+20-second no-PCM startup deadline, started by the worker when the pipeline is
+actually launched, requests a stop/retry. Every stop or new stream bumps a stream
+epoch; the HTTP hooks then fail (PRE_REQUEST/ON_REQUEST/ON_RESPONSE return -1), so
+GMF's internal reconnect cannot contact the server after cancellation, and our own
+reads poll in 200 ms slices so a trickling server cannot pin GMF's IO task (a fully
+idle socket still fails after 30 s). Remaining bounds: connect/header fetch is limited
+only by GMF's 30-second client timeout. A failed PAUSE/RESUME leaves GMF in an
+unknown state, so the worker immediately stops the pipeline in the same serialized
+command and logs the result. PAUSE clears the playback request: a paused radio is
+not resumed after an announcement or voice session (it stays idle until PLAY). Wake capture releases RX
+when a voice/standalone-announcement session owns the bus and resumes after restore.
+Codec CPU workspaces use the archives' weak memory hooks overridden in a separate,
+explicitly retained translation unit; TLS buffers also use PSRAM. I2S DMA remains
+internal. This avoids the measured 35,460-byte AAC allocation failing against a
+31,744-byte largest internal block; abundant total free memory alone is insufficient.
 `Mic diag` reports capture mode, sample rate, input/output sample counts, minimum
 remaining task stack in bytes, maximum resampling time in microseconds, I2S
 timeouts/errors, and buffer backlog/dropped bytes.
