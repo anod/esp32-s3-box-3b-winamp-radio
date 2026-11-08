@@ -33,6 +33,10 @@ esp32:
       CONFIG_ESP_HTTP_CLIENT_MAX_SAVED_RESPONSE_HEADERS: "20"
       # Espressif's prebuilt audio codec archives are linked against Newlib.
       CONFIG_LIBC_NEWLIB: "y"
+      # Keep lwIP on Core 0 with WiFi and the HTTP reader. Unpinned, it spills
+      # onto Core 1 during fast downloads and starves the priority-1 main loop,
+      # which already shares Core 1 with box3_mic and micro_wake_word.
+      CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU0: "y"
 
 psram:
   mode: octal

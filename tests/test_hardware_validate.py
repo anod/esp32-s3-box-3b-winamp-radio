@@ -122,10 +122,58 @@ class EvidenceTests(unittest.TestCase):
         self.assertTrue(hardware.slow_server_problems(twice, [28]))
         self.assertTrue(hardware.slow_server_problems(twice, [28, 15]))
 
+    def test_keepalive_404_must_be_closed_promptly_by_device(self):
+        good = ("1.0 REQ 192.168.1.107 /missing.mp3\n1.0 KEEPALIVE_404 192.168.1.107 /missing.mp3\n"
+                "1.4 KEEPALIVE_END 192.168.1.107 /missing.mp3 held=0.4 reason=client-closed\n")
+        ends, problems = hardware.keepalive_problems(good)
+        self.assertEqual(problems, [])
+        self.assertEqual(ends[0]["held_s"], 0.4)
+        self.assertTrue(hardware.keepalive_problems(good.replace("client-closed", "server-timeout"))[1])
+        reset = good.replace("client-closed", "client-reset:ConnectionResetError")
+        self.assertEqual(hardware.keepalive_problems(reset)[1], [])
+        self.assertTrue(hardware.keepalive_problems(good.replace("held=0.4", "held=40.0"))[1])
+        leaked = ("1.0 KEEPALIVE_404 192.168.1.107 /missing.mp3\n"
+                  "90.0 KEEPALIVE_OPEN 192.168.1.107 /missing.mp3 held=89.0\n")
+        self.assertEqual(len(hardware.keepalive_problems(leaked)[1]), 2)
+
+    def test_http_close_counters_are_cumulative_last_value(self):
+        def runtime(cancel, stale):
+            return ("Runtime diag: internal=70000 min=50000 largest=31744 psram=16000000 loop_us=4000 "
+                    f"gap_ms=100 control=0 reset=3 announce=0 rx=1 voice=0 "
+                    f"http_close=cancel:{cancel},{cancel} stale:{stale},0")
+        result = hardware.summarize([runtime(1, 0), runtime(2, 1)])
+        self.assertEqual(result["http_close"], [2, 2, 1, 0])
+        settled = hardware.summarize([runtime(1, 0) + " gmf_settle=4,12,0",
+                                      "[D][esp-idf:000][radio_control]: E (1) ESP_GMF_TASK: Run timeout,[TSK_0x1,0x1]"])
+        self.assertEqual(settled["gmf_settle"], [4, 12, 0])
+        self.assertEqual(settled["gmf_run_timeouts"], 1)
+        self.assertTrue(any("GMF run timeouts" in x for x in hardware.final_problems(
+            {**settled, "reset_reasons": [3]}, {})))
+        self.assertEqual(result["internal_free_min"], 70000)
+        stopped = hardware.summarize([runtime(1, 0) + " gmf_settle=4,12,0 gmf_stop=2,0"])
+        self.assertEqual(stopped["gmf_stop"], [2, 0])
+        self.assertEqual(hardware.final_problems({**stopped, "reset_reasons": [3]}, {}), [])
+        unconfirmed = hardware.summarize([runtime(1, 0) + " gmf_settle=4,12,0 gmf_stop=2,1"])
+        self.assertTrue(any("not confirmed" in x for x in hardware.final_problems(
+            {**unconfirmed, "reset_reasons": [3]}, {})))
+
+    def test_kind_drift_detects_psram_step_in_first_cycle(self):
+        transitions = [{"kind": "aac", "psram_free_min": v} for v in
+                       [16222500, 16200000, 16200010, 16200020, 16200000, 16200030]]
+        self.assertLess(hardware.kind_drift(transitions, "psram_free_min")["aac"], -8192)
+        self.assertGreater(hardware.kind_drift(transitions[1:], "psram_free_min")["aac"], -8192)
+
     def test_warmup_step_is_reported_separately(self):
         transitions = [{"kind": k, "internal_free_max": v} for k, v in
                        [("a", 60000), ("b", 61000), ("a", 53000), ("b", 54000), ("a", 53100), ("b", 54000)]]
         self.assertEqual(hardware.warmup_step(transitions, 2), {"a": -6950, "b": -7000})
+
+    def test_clock_scale_uses_device_uptime_as_reference(self):
+        # Dev host monotonic ran ~10.4% fast: 1769.6 host s for 1603 device s.
+        samples = [(94627.5 + h * 1.104, 4337 + int(h)) for h in range(0, 1603, 5)]
+        self.assertAlmostEqual(hardware.clock_scale(samples), 1 / 1.104, places=3)
+        self.assertIsNone(hardware.clock_scale(samples[:3]))
+        self.assertIsNone(hardware.clock_scale([]))
 
     def test_heap_trend_reports_drift(self):
         samples = [(t, 60000 - t, 50000, 30000) for t in range(0, 3600, 60)]

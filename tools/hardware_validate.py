@@ -34,6 +34,13 @@ RUNTIME = re.compile(
 PCM = re.compile(r"Audio diag: cb=(\d+) bytes=(\d+) i2s0_to=(\d+) i2s0_err=(\d+)"
                  r" bridge_to=(\d+) bridge_err=(\d+) bridge_short=(\d+) i2s0_short=(\d+)")
 AUDIO_EXTRA = re.compile(r"sr=(\d+) bt=(\w+) written=(\d+)(?: ann=(\d+) peak=(\d+))?")
+# Cumulative since boot: connections released after a cancelled ON_REQUEST / stale at
+# PRE_REQUEST, each as (all, TLS only).
+HTTP_CLOSE = re.compile(r"http_close=cancel:(\d+),(\d+) stale:(\d+),(\d+)")
+# Cumulative: RUN/STOP commands that first waited for GMF's thread to park after an
+# ERROR/FINISHED, the longest wait (ms), and waits that gave up (must stay 0).
+GMF_SETTLE = re.compile(r"gmf_settle=(\d+),(\d+),(\d+)")
+GMF_STOP = re.compile(r"gmf_stop=(\d+),(\d+)")
 CONTROL = re.compile(r"Player control: generation=(\d+) op=(\d+) ms=(\d+) result=(-?\d+)")
 OPS = ("STOP", "RUN", "PAUSE", "RESUME")
 TONE_URL = "http://192.168.1.10:8794/{}"
@@ -66,6 +73,18 @@ def audio_line(line):
 
 def rate_ratio(audio):
     return audio["bytes"] / (audio["sr"] * 4) if audio["sr"] else 0.0
+
+
+HEALTH_UPTIME = re.compile(r"Health: uptime=(\d+)s")
+SLOW_COMPONENT = re.compile(r"\]: (\S+) took a long time for an operation \((\d+) ms\)")
+
+
+def slow_components(lines):
+    result = {}
+    for line in lines:
+        if match := SLOW_COMPONENT.search(line):
+            result[match[1]] = max(result.get(match[1], 0), int(match[2]))
+    return result
 
 
 def summarize(lines):
@@ -120,9 +139,19 @@ def summarize(lines):
         "cleanup_stop_failures": sum("Cleanup stop after failed" in x for x in lines),
         "http_cancellations": sum("HTTP stream cancelled" in x for x in lines),
         "stream_errors": sum("Stream error" in x for x in lines),
+        # ESPHome's own per-component loop timing (whole main loop, not radio_control).
+        "slow_components": slow_components(lines),
         "stream_finished": sum("Stream finished" in x for x in lines),
         "underrun_reconnects": sum("No audio output for" in x for x in lines),
         "announcement_stalls": sum("Announcement stalled" in x for x in lines),
+        "gmf_settle": next(([int(x) for x in m.groups()] for line in reversed(lines)
+                            if (m := GMF_SETTLE.search(line))), None),
+        # Stops repeated after GMF returned early on a stale STOP bit, and unconfirmed ones.
+        "gmf_stop": next(([int(x) for x in m.groups()] for line in reversed(lines)
+                          if (m := GMF_STOP.search(line))), None),
+        "gmf_run_timeouts": sum("ESP_GMF_TASK: Run timeout" in x for x in lines),
+        "http_close": next(([int(x) for x in m.groups()] for line in reversed(lines)
+                            if (m := HTTP_CLOSE.search(line))), None),
     }
 
 
@@ -149,6 +178,12 @@ def final_problems(overall, expected):
     for name in EXPECTED_EVENTS:
         if overall[name] != expected.get(name, 0):
             problems.append(f"{name}={overall[name]} (expected {expected.get(name, 0)})")
+    if overall.get("gmf_run_timeouts"):
+        problems.append(f"GMF run timeouts={overall['gmf_run_timeouts']} (expected 0)")
+    if overall.get("gmf_settle") and overall["gmf_settle"][2]:
+        problems.append(f"GMF settle waits gave up {overall['gmf_settle'][2]} times")
+    if overall.get("gmf_stop") and overall["gmf_stop"][1]:
+        problems.append(f"GMF stops not confirmed by a terminal event: {overall['gmf_stop'][1]}")
     if len(overall["reset_reasons"]) > 1:
         problems.append(f"reset reason changed: {overall['reset_reasons']}")
     return problems
@@ -164,6 +199,27 @@ def tone_requests(text):
             ends.append({"t": float(parts[0]), "client": parts[2],
                          "sent": int(parts[3].split("=")[1]), "reason": parts[4].split("=", 1)[1]})
     return requests, ends
+
+
+def keepalive_problems(text, max_held_s=15.0):
+    """Every kept-alive HTTP 404 connection must be closed by the device, promptly."""
+    opened, ended, problems = 0, [], []
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[1] == "KEEPALIVE_404":
+            opened += 1
+        elif len(parts) >= 6 and parts[1] == "KEEPALIVE_END":
+            ended.append({"t": float(parts[0]), "path": parts[3],
+                          "held_s": float(parts[4].split("=")[1]), "reason": parts[5].split("=", 1)[1]})
+        elif len(parts) >= 3 and parts[1] == "KEEPALIVE_OPEN":
+            problems.append(f"device never closed its {parts[3]} connection ({parts[4]})")
+    if len(ended) != opened:
+        problems.append(f"{opened} kept-alive 404 connections, {len(ended)} ended")
+    for end in ended:
+        # A close with unread data in the receive buffer makes lwIP send RST.
+        if not end["reason"].startswith("client-") or end["held_s"] > max_held_s:
+            problems.append(f"404 connection not released by the device in time: {end}")
+    return ended, problems
 
 
 def slow_server_problems(text, recovered_after_s):
@@ -270,7 +326,25 @@ print(json.dumps(info))
 def tone_lifetime(args):
     if args.scenario == "soak":
         return min(3600, args.soak_minutes * 60 + 600)
-    return {"announcement": 300, "lifecycle": 420, "all": 900}.get(args.scenario, 300)
+    if args.scenario == "invalid":
+        return 120 + 60 * args.invalid_runs
+    return {"announcement": 300, "lifecycle": 420, "connection": 600, "all": 900}.get(args.scenario, 300)
+
+
+def clock_scale(samples, min_span_s=30.0):
+    """Device seconds per host second from (host_time, device_uptime_s) samples.
+
+    Host clocks (notably VMs) can drift by several percent; the device's crystal
+    is the reference for deadlines and soak length. Returns None until the
+    samples span enough host time for whole-second uptime to be accurate.
+    """
+    if len(samples) < 3 or samples[-1][0] - samples[0][0] < min_span_s:
+        return None
+    n = len(samples)
+    mx = sum(h for h, _ in samples) / n
+    my = sum(u for _, u in samples) / n
+    sxx = sum((h - mx) ** 2 for h, _ in samples)
+    return sum((h - mx) * (u - my) for h, u in samples) / sxx
 
 
 async def run(args):
@@ -279,6 +353,7 @@ async def run(args):
     secrets = yaml.safe_load((ROOT / "secrets.yaml").read_text())
     api = APIClient(args.device, 6053, "", noise_psk=secrets["esp32radio_api_key"])
     states, lines, times, checks = {}, [], [], []
+    uptime_samples = []  # (host monotonic, device uptime s)
     expected = {name: 0 for name in EXPECTED_EVENTS}
     report = {"stage": args.stage, "scenario": args.scenario, "checks": checks,
               "windows": {}, "expected_events": expected, "measurements": {}}
@@ -300,6 +375,12 @@ async def run(args):
             lines.append(line)
             times.append(time.monotonic())
             log.write(f"{times[-1]:.3f} {line}\n")
+            if match := HEALTH_UPTIME.search(line):
+                uptime_samples.append((times[-1], int(match[1])))
+
+        def dev(host_seconds):
+            """Convert a host-clock duration to device (real) seconds."""
+            return host_seconds * (clock_scale(uptime_samples) or 1.0)
 
         def phase():
             return states[keys["Playback Phase"]].state
@@ -481,7 +562,7 @@ async def run(args):
             began = await wait_line(r"Runtime diag: .* voice=1", start, 15, f"{label}: voice session")
             ended = await wait_line(r"Runtime diag: .* announce=0 rx=\d voice=0", began, 65,
                                     f"{label}: voice session end")
-            report["measurements"][label] = {"session_s": round(times[ended] - times[began], 1)}
+            report["measurements"][label] = {"session_s": round(dev(times[ended] - times[began]), 1)}
             if paused:
                 await window(f"{label}_after", 10, "none")
                 if states[player].state == MediaPlayerState.PLAYING:
@@ -493,7 +574,7 @@ async def run(args):
                 checks.append("paused_radio_stays_silent_after_voice_session")
             else:
                 index = await wait_radio_pcm(ended, 25, f"{label}: radio resume")
-                report["measurements"][label]["resume_s"] = round(times[index] - times[ended], 1)
+                report["measurements"][label]["resume_s"] = round(dev(times[index] - times[ended]), 1)
                 await window(f"{label}_restored", 10)
                 checks.append("assistant_restores_radio")
 
@@ -513,7 +594,7 @@ async def run(args):
             source = "worker_line"
             if launch is None:
                 launch, source = worker_done_after(lines, requested), "runtime_diag"
-                launch_ms = round((times[launch] - times[requested]) * 1000)
+                launch_ms = round(dev(times[launch] - times[requested]) * 1000)
             else:
                 launch_ms = int(CONTROL.search(lines[launch])[3])
             await wait(lambda: worker_done_after(lines, timeout) is not None, 5, "teardown STOP")
@@ -522,20 +603,20 @@ async def run(args):
             stop = find(r"Player control: .* op=0 ", timeout, recovered)
             if stop is None:
                 stop, stop_source = done, "runtime_diag"
-                stop_ms = round((times[stop] - times[timeout]) * 1000)
+                stop_ms = round(dev(times[stop] - times[timeout]) * 1000)
             else:
                 stop_ms = int(CONTROL.search(lines[stop])[3])
                 stop_source = "worker_line"
             # Ignore the first post-launch bucket: it may contain the old stream's tail.
             first_bucket = find("Audio diag:", launch, timeout) or launch
             stalled = summarize(lines[first_bucket + 1:timeout])
-            launch_to_timeout = times[timeout] - times[launch]
+            launch_to_timeout = dev(times[timeout] - times[launch])
             measurement = {
                 "launch_to_timeout_s": round(launch_to_timeout, 2),
                 "launch_control_ms": launch_ms, "launch_source": source,
                 "teardown_stop_ms": stop_ms, "teardown_source": stop_source,
-                "timeout_to_pcm_s": round(times[recovered] - times[timeout], 2),
-                "request_to_pcm_s": round(times[recovered] - sent, 2),
+                "timeout_to_pcm_s": round(dev(times[recovered] - times[timeout]), 2),
+                "request_to_pcm_s": round(dev(times[recovered] - sent), 2),
                 "stalled_pcm_bytes": stalled["pcm_bytes"],
                 "http_cancellations": summarize(lines[timeout:recovered + 1])["http_cancellations"],
             }
@@ -559,6 +640,9 @@ async def run(args):
             await window("stalled_startup_restored", 8)
             checks.append("stalled_startup_times_out_from_launch_cancels_http_and_recovers")
 
+        invalid_runs = []
+        report["measurements"]["invalid_runs"] = invalid_runs
+
         async def invalid_stream_check():
             await start_tone_server()
             await ensure_playing("pre_invalid_stream")
@@ -566,12 +650,19 @@ async def run(args):
             api.media_player_command(player, media_url=TONE_URL.format("invalid.mp3"))
             requested = await wait_line(r"Play URL: .*invalid\.mp3", start, 10, "invalid stream request")
             await wait(lambda: worker_done_after(lines, requested) is not None, 10, "invalid stream launch")
-            failure = await wait_line(r"Stream error|Stream finished|Playback startup timed out",
-                                      requested, 25, "decoder failure")
+            # The Core-0 "Stream error" line can be relayed late or dropped; the main loop's
+            # retry is then the evidence (its other causes log their own main-loop lines).
+            failure = await wait_line(r"Stream error|Stream finished|Playback startup timed out|"
+                                      r"Retrying stream", requested, 25, "decoder failure")
             launch = find(r"Player control: .* op=1 ", requested, failure)
             if launch is None:
                 launch = min(worker_done_after(lines, requested), failure)
             outcome = lines[failure]
+            if "Retrying stream" in outcome:
+                if (find(r"Player control timed out|Player control: .* op=1 .*result=[^0]",
+                         requested, failure) is not None or launch == failure):
+                    raise AssertionError("invalid stream retried without a decoder failure")
+                outcome = "Stream error (inferred from main-loop retry; task log late or dropped)"
             if "startup timed out" in outcome:
                 expected["startup_timeouts"] += 1
             recovered = await wait_radio_pcm(failure, 20, "station recovery after decoder failure")
@@ -581,15 +672,176 @@ async def run(args):
                      if (m := CONTROL.search(line)) and m[2] == "0"]
             report["measurements"]["invalid_stream"] = {
                 "outcome": outcome.split(": ", 1)[-1][:80],
-                "launch_to_failure_s": round(times[failure] - times[launch], 2),
-                "failure_to_pcm_s": round(times[recovered] - times[failure], 2),
+                "launch_to_failure_s": round(dev(times[failure] - times[launch]), 2),
+                "failure_to_pcm_s": round(dev(times[recovered] - times[failure]), 2),
                 "pcm_bytes_before_failure": bad["pcm_bytes"],
                 "teardown_stop_ms": max(stops, default=None),
             }
             if stops and max(stops) > 2000:
                 raise AssertionError("decoder failure teardown took more than 2 s")
             await window("invalid_stream_restored", 8)
+            during = summarize(lines[requested:])
+            report["measurements"]["invalid_stream"].update(
+                loop_gap_max_ms=during["loop_gap_max_ms"], radio_loop_max_us=during["radio_loop_max_us"],
+                slow_components=during["slow_components"])
+            invalid_runs.append(report["measurements"]["invalid_stream"])
             checks.append("decoder_failure_tears_down_and_recovers")
+
+        async def failed_open_check(repeats=3):
+            # An HTTP 404 fails the open after connecting; GMF then skips the IO close and
+            # keeps the connected client. Reopening it must not leak the socket
+            # (LWIP_MAX_SOCKETS is 10); a stale fd, when logged, must not grow.
+            await start_tone_server()
+            runs, fds = [], []
+            for n in range(repeats):
+                await ensure_playing(f"pre_failed_open_{n}")
+                ceiling = summarize(lines[-12:])["internal_free_max"]
+                before = await http_close_counts(f"failed_open_{n}")
+                start = len(lines)
+                api.media_player_command(player, media_url=TONE_URL.format("missing.mp3"))
+                requested = await wait_line(r"Play URL: .*missing\.mp3", start, 10, "missing stream request")
+                failure = await wait_line(r"Stream error|Stream finished|Playback startup timed out",
+                                          requested, 25, "HTTP 404 failure")
+                if "startup timed out" in lines[failure]:
+                    raise AssertionError("HTTP 404 was not reported as a stream failure")
+                recovered = await wait_radio_pcm(failure, 20, "station recovery after HTTP 404")
+                stale = [int(m[1]) for line in lines[requested:recovered + 1]
+                         if (m := re.search(r"Closing stale HTTP connection .*\(fd (\d+)\)", line))]
+                fds.extend(stale)
+                metrics = await window(f"failed_open_{n}_restored", 8)
+                after = await http_close_counts(f"failed_open_{n}")
+                runs.append({"failure_to_pcm_s": round(dev(times[recovered] - times[failure]), 2),
+                             # Recovery reconnects to the station's host: set_url() closes.
+                             "http_close_delta": [a - b for a, b in zip(after, before)],
+                             "stale_fds": stale, "free_max_before": ceiling,
+                             "free_max_after": metrics["internal_free_max"]})
+            report["measurements"]["failed_open"] = runs
+            if len(set(fds)) > 1:
+                raise AssertionError(f"stale HTTP socket numbers grew across failed opens: {fds}")
+            checks.append("failed_open_releases_http_connection_and_recovers")
+
+        async def http_close_counts(label):
+            """Counters from the first main-loop Runtime diag logged after this call."""
+            start = len(lines)
+            index = await wait_line(HTTP_CLOSE.pattern, start, 5, f"{label}: http_close counters")
+            return [int(x) for x in HTTP_CLOSE.search(lines[index]).groups()]
+
+        async def same_host_failed_open_check(repeats=3):
+            # A 404 announcement followed by a queued announcement from the same server:
+            # set_url() keeps the failed open's connection (same host/port), so only the
+            # PRE_REQUEST guard can release it before esp_http_client_open() reconnects.
+            await start_tone_server()
+            runs = []
+            for n in range(repeats):
+                label = f"same_host_failed_open_{n}"
+                await ensure_playing(f"pre_{label}")
+                before = await http_close_counts(label)
+                start = len(lines)
+                api.media_player_command(player, media_url=TONE_URL.format("missing-announce.mp3"),
+                                         announcement=True)
+                api.media_player_command(player, command=MediaPlayerCommand.ENQUEUE,
+                                         media_url=TONE_URL.format("tone.mp3"), announcement=True)
+                await wait(lambda: phase() == "announcing", 10, f"{label}: announcing phase")
+                await wait(lambda: phase() != "announcing", 25, f"{label}: announcement end")
+                await wait_radio_pcm(len(lines), 20, f"{label}: radio resume")
+                await asyncio.sleep(1.2)
+                metrics = summarize(lines[start:])
+                after = await http_close_counts(label)
+                delta = [a - b for a, b in zip(after, before)]
+                need = int(TONE_SECONDS * 44100 * 4 * RATE_RATIO)
+                runs.append({"http_close_delta": delta, "announcement_bytes": metrics["announcement_bytes"],
+                             "announcement_peak_min": metrics["announcement_peak_min"],
+                             "stale_log_lines": sum("Closing stale HTTP connection" in x
+                                                    for x in lines[start:])})
+                if delta != [0, 0, 1, 0]:
+                    raise AssertionError(f"{label}: expected exactly one plain-HTTP stale close, "
+                                         f"http_close delta (cancel,tls,stale,tls)={delta}")
+                if metrics["announcement_bytes"] < need or not metrics["announcement_peak_min"]:
+                    raise AssertionError(f"{label}: queued announcement after the 404 not output: {runs[-1]}")
+                await window(f"{label}_restored", 6)
+            report["measurements"]["same_host_failed_open"] = runs
+            checks.append("same_host_failed_open_closes_stale_connection_before_reopen")
+
+        async def gmf_stop_counts(label):
+            start = len(lines)
+            index = await wait_line(GMF_STOP.pattern, start, 5, f"{label}: gmf_stop counters")
+            return [int(x) for x in GMF_STOP.search(lines[index]).groups()]
+
+        async def stale_stop_check(repeats=3):
+            # A run that ends by itself (here a 404 announcement) leaves GMF's STOP bit set
+            # until the next run reaches its job loop. Stopping the queued announcement while
+            # its open waits 5 s for response headers used to return at once on that stale
+            # bit, leaving the pipeline running; the next RUN then timed out after 5 s.
+            await start_tone_server()
+            runs = []
+            for n in range(repeats):
+                label = f"stale_stop_{n}"
+                await ensure_playing(f"pre_{label}")
+                before = await gmf_stop_counts(label)
+                start = len(lines)
+                api.media_player_command(player, media_url=TONE_URL.format("missing-stale.mp3"),
+                                         announcement=True)
+                api.media_player_command(player, command=MediaPlayerCommand.ENQUEUE,
+                                         media_url=TONE_URL.format("slow-open.mp3"), announcement=True)
+                # The 404 fails within ~0.2 s; the queued open then waits 5 s for headers.
+                # (The relayed tone-server log is not timely enough to synchronise on.)
+                await wait(lambda: phase() == "announcing", 10, f"{label}: announcing phase")
+                await asyncio.sleep(2.0)
+                stopped = len(lines)
+                api.media_player_command(player, command=MediaPlayerCommand.STOP)
+                await asyncio.sleep(0.3)
+                api.media_player_command(player, command=MediaPlayerCommand.PLAY)
+                recovered = await wait_radio_pcm(stopped, 15, f"{label}: radio PCM after stop+play")
+                await asyncio.sleep(1.2)
+                after = await gmf_stop_counts(label)
+                metrics = summarize(lines[start:])
+                delta = [a - b for a, b in zip(after, before)]
+                runs.append({"gmf_stop_delta": delta, "stop_to_pcm_s": round(dev(times[recovered] - times[stopped]), 2),
+                             "gmf_run_timeouts": metrics["gmf_run_timeouts"],
+                             "player_failures": metrics["player_failures"],
+                             "control_timeouts": metrics["control_timeouts"]})
+                print("stale_stop", json.dumps(runs[-1]), flush=True)
+                if delta[0] < 1 or delta[1] or metrics["gmf_run_timeouts"] or metrics["player_failures"] \
+                        or metrics["control_timeouts"]:
+                    raise AssertionError(f"{label}: stale GMF stop not repeated cleanly: {runs[-1]}")
+                await window(f"{label}_restored", 6)
+            report["measurements"]["stale_stop"] = runs
+            checks.append("stop_while_opening_after_self_ended_run_is_confirmed")
+
+        async def tls_cancel_check(min_cancels=3, max_runs=16):
+            # PLAY while KROQ's (HTTPS) start is connecting cancels it at ON_REQUEST, after
+            # the TLS session exists. Sweep the delay until enough such cancels happened;
+            # each used to leak ~22 KB PSRAM, so settled KROQ PSRAM must stay flat.
+            delays = [0.6, 0.8, 1.0, 1.2, 1.4, 1.7, 2.0]
+            hits, runs, psram, largest = 0, [], [], []
+            for n in range(max_runs):
+                if hits >= min_cancels:
+                    break
+                hit_delays = [r["delay"] for r in runs if r["tls_cancels"]]
+                delay = hit_delays[-1] if hit_delays else delays[n % len(delays)]
+                label = f"tls_cancel_{n}_{delay}"
+                before = await http_close_counts(label)
+                to_pcm = await superseded_switch("KROQ", delay, label)
+                settled = await window(f"{label}_settled", 4)
+                after = await http_close_counts(label)
+                delta = [a - b for a, b in zip(after, before)]
+                hits += delta[1]
+                psram.append(settled["psram_free_min"])
+                largest.append(settled["internal_largest_min"])
+                runs.append({"delay": delay, "tls_cancels": delta[1], "http_close_delta": delta,
+                             "time_to_pcm_s": to_pcm, "settled_psram_min": settled["psram_free_min"],
+                             "settled_internal_free_max": settled["internal_free_max"],
+                             "settled_internal_largest_min": settled["internal_largest_min"]})
+                print("tls_cancel", json.dumps(runs[-1]), flush=True)
+                report["measurements"]["tls_cancel_runs"] = runs
+                await switch_station(original["station"], f"{label}_back")
+                await window(f"{label}_back", 4)
+            report["measurements"]["tls_cancels_after_connect"] = hits
+            if hits < min_cancels:
+                raise AssertionError(f"only {hits} HTTPS starts cancelled after connect in {len(runs)} runs")
+            if min(psram[1:]) < psram[0] - 8192:
+                raise AssertionError(f"settled KROQ PSRAM dropped across HTTPS cancels: {psram}")
+            checks.append("https_cancel_after_connect_releases_tls_session")
 
         async def lifecycle_checks():
             api.media_player_command(player, command=MediaPlayerCommand.PAUSE)
@@ -625,7 +877,7 @@ async def run(args):
             await wait(lambda: states[station].state == name, 10, f"{label}: station {name}")
             await wait(lambda: replayed(start) is not None, 25, f"{label}: phase playing on {name}")
             index = await wait_radio_pcm(replayed(start), 25, f"{label}: PCM from {name}")
-            return round(times[index] - sent, 2)
+            return round(dev(times[index] - sent), 2)
 
         async def superseded_switch(name, delay, label):
             # PLAY during a station switch's ~1 s teardown supersedes the queued RUN; the
@@ -639,23 +891,46 @@ async def run(args):
             index = await wait_radio_pcm(replayed(start), 25, f"{label}: PCM")
             if summarize(lines[start:])["control_timeouts"]:
                 raise AssertionError(f"{label}: control timeout")
-            return round(times[index] - times[start], 2)
+            return round(dev(times[index] - times[start]), 2)
 
-        async def superseded_run_check():
-            names = ["KROQ", original["station"]] * 2
-            for n, (delay, name) in enumerate(zip((0.2, 0.5, 0.8, 0.5), names)):
+        async def superseded_run_check(runs=4):
+            # A start cancelled after its TLS/TCP connect used to leak that connection
+            # (~22 KB PSRAM + ~7 KB internal per TLS session), so the settled PSRAM of
+            # each station must not step down across repeats.
+            names = ["KROQ", original["station"]]
+            psram = {}
+            for n in range(runs):
+                delay, name = (0.2, 0.5, 0.8, 0.5)[n % 4], names[n % 2]
                 label = f"superseded_run_{n}_{name}_{delay}"
                 report["measurements"][f"{label}_time_to_pcm_s"] = await superseded_switch(name, delay, label)
-                await window(label, 4)
-            checks.append("play_during_switch_teardown_has_no_control_deadlock")
+                await window(label, 3)
+                psram.setdefault(name, []).append((await window(f"{label}_settled", 3))["psram_free_min"])
+            report["measurements"]["superseded_settled_psram_min"] = psram
+            for name, values in psram.items():
+                if min(values[1:], default=values[0]) < values[0] - 8192:
+                    raise AssertionError(f"{name}: settled PSRAM dropped across superseded starts: {values}")
+            report["measurements"]["superseded_cancelled_after_connect"] = sum(
+                "user callback:181" in line for line in lines)
+            checks.append("play_during_switch_teardown_has_no_control_deadlock_or_connection_leak")
 
         async def codec_checks():
+            aac_start = len(lines)
             report["measurements"]["aac_time_to_pcm_s"] = await switch_station("KROQ", "aac")
             await window("aac", 20)
+            aac_titles = [x for x in lines[aac_start:] if "ICY: " in x]
+            mp3_start = len(lines)
             report["measurements"]["mp3_time_to_pcm_s"] = await switch_station(
                 original["station"], "switch_from_aac")
             await window("switch_from_aac", 10)
             checks.append("aac_and_mp3_sustained")
+            # ICY StreamTitle parsing (GMF + response-header API), required for the MP3 station.
+            mp3_titles = [x for x in lines[mp3_start:] if "ICY: " in x]
+            report["measurements"]["icy_titles"] = {"aac": len(aac_titles), "mp3": len(mp3_titles),
+                                                    "mp3_example": mp3_titles[0].split("ICY: ", 1)[1]
+                                                    if mp3_titles else None}
+            if not mp3_titles:
+                raise AssertionError(f"no ICY StreamTitle from {original['station']}")
+            checks.append("icy_title_parsed")
 
         async def routing_checks():
             api.switch_command(bridge, False)
@@ -689,11 +964,11 @@ async def run(args):
             soak_start = time.monotonic()
             soak_index = len(lines)
             n = 0
-            while (time.monotonic() - soak_start < args.soak_minutes * 60
+            while (dev(time.monotonic() - soak_start) < args.soak_minutes * 60
                    or n < args.transitions):
                 kind, name = cycle[n % len(cycle)]
                 label = f"soak_{n:02d}_{kind}"
-                entry = {"n": n, "kind": kind, "t_s": round(time.monotonic() - soak_start, 1)}
+                entry = {"n": n, "kind": kind, "t_s": round(dev(time.monotonic() - soak_start), 1)}
                 if kind == "announcement":
                     metrics = await announce(label)
                     entry["announcement_bytes"] = metrics["announcement_bytes"]
@@ -719,22 +994,39 @@ async def run(args):
             samples = []
             for index in range(soak_index, len(lines)):
                 if match := RUNTIME.search(lines[index]):
-                    samples.append((times[index] - soak_start, int(match[1]), int(match[2]), int(match[3])))
+                    samples.append((dev(times[index] - soak_start), int(match[1]), int(match[2]), int(match[3])))
             trend = heap_trend(samples)
             # The first cycle exercises every path once; one-time lazy allocations show up
             # there as a step. A leak keeps lowering the ceiling in the later cycles.
             drift = kind_drift(transitions[len(cycle):])
             warmup = warmup_step(transitions, len(cycle))
+            # Leaks are timing dependent (the first one may land in the first cycle), so the
+            # whole run, PSRAM and the largest internal block are checked too.
+            full = {key: kind_drift(transitions, key) for key in
+                    ("internal_free_max", "psram_free_min", "internal_largest_min")}
+            psram_warmup = warmup_step(transitions, len(cycle), "psram_free_min")
             report["soak"] = {
-                "minutes": round((time.monotonic() - soak_start) / 60, 1),
+                "minutes": round(dev(time.monotonic() - soak_start) / 60, 1),
                 "transitions": transitions, "heap_trend": trend,
                 "same_kind_free_max_drift": drift,
                 "warmup_cycle_free_max_step": warmup,
+                "warmup_cycle_psram_step": psram_warmup,
+                "full_run_drift": full,
                 "summary": {k: v for k, v in summarize(lines[soak_index:]).items()
                             if not k.endswith("examples")},
             }
+            limits = {"internal_free_max": args.leak_bytes, "psram_free_min": args.psram_leak_bytes,
+                      "internal_largest_min": args.largest_drop_bytes}
+            problems = [f"{key} {kind} {value}" for key, values in full.items()
+                        for kind, value in values.items() if value < -limits[key]]
+            problems += [f"internal_free_max first-cycle step {kind} {value}" for kind, value in warmup.items()
+                         if value < -args.leak_bytes]
+            problems += [f"psram first-cycle step {kind} {value}" for kind, value in psram_warmup.items()
+                         if value < -args.psram_leak_bytes]
             if any(value < -args.leak_bytes for value in drift.values()):
-                raise AssertionError(f"internal heap drift across soak: {drift}")
+                problems.append(f"internal heap drift after first cycle: {drift}")
+            if problems:
+                raise AssertionError("memory drift across soak: " + "; ".join(problems))
             checks.append("soak_transitions_without_leak_or_fault")
 
         try:
@@ -786,7 +1078,19 @@ async def run(args):
                 await routing_checks()
             if args.scenario in ("announcement", "all"):
                 await announcement_checks()
+            if args.scenario == "connection":
+                await failed_open_check()
+                await same_host_failed_open_check(args.same_host_runs)
+                await tls_cancel_check(args.tls_cancels)
+                await stale_stop_check(args.stale_stop_runs)
+                await superseded_run_check(args.superseded_runs)
+            if args.scenario == "stale_stop":
+                await stale_stop_check(args.stale_stop_runs)
+            if args.scenario == "invalid":
+                for _ in range(args.invalid_runs):
+                    await invalid_stream_check()
             if args.scenario in ("lifecycle", "all"):
+                await failed_open_check()
                 await superseded_run_check()
                 await stalled_startup_check()
                 await invalid_stream_check()
@@ -843,7 +1147,8 @@ async def run(args):
             overall = summarize(lines)
             report["overall"] = overall
             report["api_rtt_max_ms"] = round(max(latencies, default=0), 1) or None
-            report["duration_s"] = round(time.monotonic() - started, 1)
+            report["duration_s"] = round(dev(time.monotonic() - started), 1)
+            report["clock_device_per_host"] = clock_scale(uptime_samples)
             if problems := final_problems(overall, expected):
                 report["unexpected_events"] = problems
                 report["status"] = "failed"
@@ -866,6 +1171,11 @@ async def run(args):
                 if tone_server.returncode:
                     report["tone_server_error"] = tone_server.returncode
                     report["status"] = "failed"
+                ends, problems = keepalive_problems(text)
+                report["keepalive_404_ends"] = ends
+                if problems:
+                    report["keepalive_problems"] = problems
+                    report["status"] = "failed"
                 if slow_recoveries and (problems := slow_server_problems(text, slow_recoveries)):
                     report["slow_server_problems"] = problems
                     report["status"] = "failed"
@@ -877,13 +1187,26 @@ def main():
     parser.add_argument("--device", default="192.168.1.107")
     parser.add_argument("--stage", required=True)
     parser.add_argument("--scenario", default="full",
-                        choices=["full", "announcement", "lifecycle", "assistant", "all", "soak"])
+                        choices=["full", "announcement", "lifecycle", "connection", "stale_stop", "invalid", "assistant", "all",
+                                 "soak"])
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--mp3-station", default="Rock Antenne")
     parser.add_argument("--soak-minutes", type=int, default=30)
     parser.add_argument("--transitions", type=int, default=20)
     parser.add_argument("--dwell", type=int, default=30, help="Sustained-PCM seconds after each soak transition")
     parser.add_argument("--leak-bytes", type=int, default=4096)
+    parser.add_argument("--psram-leak-bytes", type=int, default=8192,
+                        help="A leaked TLS session costs ~22 KB PSRAM")
+    parser.add_argument("--largest-drop-bytes", type=int, default=8192)
+    parser.add_argument("--superseded-runs", type=int, default=4)
+    parser.add_argument("--same-host-runs", type=int, default=5,
+                        help="404 announcement + queued same-host announcement repeats")
+    parser.add_argument("--stale-stop-runs", type=int, default=3,
+                        help="Stops of a queued announcement still opening after a 404 (connection)")
+    parser.add_argument("--invalid-runs", type=int, default=6,
+                        help="Decoder-failure injections (invalid scenario)")
+    parser.add_argument("--tls-cancels", type=int, default=3,
+                        help="HTTPS starts that must be cancelled after connect (connection scenario)")
     args = parser.parse_args()
     asyncio.run(run(args))
     if json.loads(args.report.read_text()).get("status") != "passed":

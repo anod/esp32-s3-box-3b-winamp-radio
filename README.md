@@ -14,6 +14,7 @@ Internet radio for the [ESP32-S3-BOX-3](https://github.com/espressif/esp-box) bu
 - WiFi signal strength & bitrate display
 - Bluetooth speaker output via I2S bridge to ESP32-WROOM-32D
 - Home Assistant integration via ESPHome native API (media player, controls, sensors)
+- Home Assistant voice assistant: Home button, "Ask Assistant" button or the `okay_nabu` wake word; replies and cues on the internal speaker, then the radio resumes
 - Station, volume, brightness & output mode persisted across reboots
 - OTA firmware updates
 
@@ -121,6 +122,10 @@ backpressure, then requires clean settled writes. A connection loss fails rather
 than silently treating a reboot as recovery. Logs confirm PCM flow, **not audible
 fidelity or successful speech**; per-second counters cannot rule out sub-second
 underruns, so a listener's stutter report outranks clean counters.
+Durations (deadlines, recovery times, soak length) are measured in device time:
+the runner fits the `radio_health` uptime against the host clock
+(`clock_device_per_host` in the report), because a drifting host clock (one dev PC
+ran ~10% fast) would otherwise inflate deadlines and shorten soaks.
 The quiet synthetic-tone server (`tools/ha_tone.py`, local `ffmpeg`, no HA
 restart) runs inside HA's container for a bounded lifetime and logs each request.
 `/tone.mp3` is a 3-second -30 dB tone; `/slow.mp3` sends headers and then one byte
@@ -134,7 +139,23 @@ transitions with a sustained-PCM dwell after each and reports the internal heap
 trend (free, low-water, largest block), loop timing, errors and resets. The
 first cycle is reported as a warm-up step; the leak check compares per-kind heap
 ceilings across the later cycles.
-Use `--scenario full`, `announcement`, `lifecycle`, `assistant` or `soak` for stage checks.
+`--scenario connection` is the short targeted check for HTTP connection reuse and GMF
+run/stop races, judged by firmware counters in the `Runtime diag` line
+(`http_close=cancel:all,tls stale:all,tls gmf_settle=waits,max_ms,timeouts
+gmf_stop=retries,unconfirmed`, cumulative since boot):
+- three HTTP 404 opens of a different host (`/missing.mp3`) that must recover;
+- `--same-host-runs` 404 announcements followed by a queued same-server announcement: the
+  tone server keeps the 404 connection alive (HTTP/1.1, held up to 120 s, logged as
+  `KEEPALIVE_404`/`KEEPALIVE_END`), so each run must add exactly one plain stale close and
+  the device, not the server, must end every held connection;
+- PLAY during KROQ (HTTPS) starts until `--tls-cancels` starts were cancelled after their
+  TLS connect, with flat settled PSRAM (a leaked TLS session is ~22 KB);
+- `--stale-stop-runs` STOPs of a queued announcement whose open waits 5 s for headers
+  (`/slow-open.mp3`) right after a 404 announcement: each must count one repeated GMF stop,
+  no unconfirmed stop and no GMF `Run timeout` (`--scenario stale_stop` runs only this);
+- `--superseded-runs` PLAY-during-switch starts with flat settled PSRAM.
+Any GMF `Run timeout`, settle-wait timeout or unconfirmed stop fails every scenario.
+Use `--scenario full`, `announcement`, `lifecycle`, `connection`, `stale_stop`, `assistant` or `soak` for stage checks.
 
 For manual builds outside this remote development workflow:
 
@@ -157,12 +178,30 @@ Audio pins use ESPHome GPIO validation; the shared amplifier pin declares
 `allow_other_uses: true` in both components. LovyanGFX's autodetected display pins
 remain board-specific and are not registered by these audio schemas.
 
-The GMF engine still owns the shared speaker/microphone I2S bus, ICY/AAC decoding
-and BT PCM routing. Display volume, mute and playback state use the standard
+The GMF engine still owns the shared speaker/microphone I2S bus, ICY/AAC decoding,
+the FFT spectrum PCM tap and BT PCM routing. Display volume, mute and playback state use the standard
 MediaPlayer interface, and its BT toggle uses the standard Switch interface;
 station selection and metadata still use the custom radio backend.
 These remain migration work before adopting ESPHome's
 standard audio sources; Sendspin is not enabled by this preparation.
+
+### Phase 1 (preparation) status
+
+Accepted on firmware compiled 2026-11-08 10:20:45 +0200 (ESPHome 2026.10.2, ESP-IDF
+6.0.1, artifact SHA-256 `cbda1435…2382ff`): the full regression scenario passed 14/14
+checks, and a 30.5-minute soak (`phase1-final-soak3`) passed 48 AAC/MP3/announcement/
+PLAY-during-switch/invalid-stream/stalled-startup transitions with flat internal heap
+(low-water 34880, largest block 31744), flat PSRAM, no control timeouts, write errors
+or resets, and only the deliberately injected startup timeouts. Spoken TTS reply and
+radio resume were confirmed by ear. Known limitations:
+- Line-rate invalid/undecodable streams starve Core 1 (wake-word inference outranks
+  the ESPHome loop), giving 200–300 ms UI/main-loop gaps; audio is unaffected and
+  normal playback/transitions stay below ~190 ms.
+- Enabling the BT bridge has an expected ~2 s backpressure transient.
+- A stale TLS connection held at PRE_REQUEST has not been reproduced on hardware;
+  plain-HTTP stale closes and TLS cancel-after-connect are covered.
+- Internet stations can underrun upstream (one ~1.5 s mid-stream PCM gap was seen on
+  KROQ); there is no HTTP receive-rate diagnostic to attribute such gaps.
 
 ## Testing with Copilot remote agent
 
@@ -318,6 +357,7 @@ The radio appears as a native ESPHome media player in Home Assistant — no MQTT
 
 - **Core 0**: ESP-GMF worker thread — HTTP fetch, decode, PCM output callback, and stream events
 - **Core 1**: ESPHome main loop — UI rendering at ~15fps, touch/button input, FFT computation, WiFi, HA API
+- lwIP's `tcpip` task is pinned to Core 0 with WiFi and the HTTP reader, so fast downloads do not starve the main loop, which shares Core 1 with mic capture and wake-word inference
 - **Display**: PSRAM-backed LovyanGFX sprite (320×218), composed and pushed once per frame
 - **Audio**: ES8311 codec via `esp_codec_dev`, ESP-GMF `esp_audio_simple_player` for HTTP/TLS streaming
 - **Platform APIs**: Custom components use ESP-IDF/FreeRTOS plus ESPHome network/native API helpers; no Arduino framework

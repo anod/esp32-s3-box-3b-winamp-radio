@@ -150,10 +150,18 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   };
   bool request_player_(PlayerOperation operation, const char *uri = nullptr, bool announcement = false);
   static void player_control_task_(void *arg);
+  void wait_gmf_parked_();
+  esp_gmf_err_t stop_pipeline_(bool launched);
   QueueHandle_t player_commands_{nullptr};
   std::atomic<uint32_t> player_generation_{0};
   std::atomic<uint32_t> player_completed_{0};
   std::atomic<bool> accept_player_events_{false};
+  // A run ended with ERROR/FINISHED: GMF's thread is still winding down (after a failed
+  // open it deletes the task's job list), so the next RUN must wait until it parks.
+  std::atomic<bool> gmf_settle_pending_{false};
+  std::atomic<TaskHandle_t> gmf_task_{nullptr};
+  // Set by STOPPED/FINISHED/ERROR from GMF; cleared by the worker just before a run.
+  std::atomic<bool> gmf_ended_{true};
   std::atomic<bool> pcm_enabled_{false};
   std::mutex player_request_mutex_;
   std::atomic<bool> announcement_output_{false};
@@ -259,6 +267,16 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   std::atomic<uint32_t> diag_bridge_short_writes_{0};
   // Counts I2S0 writes that didn't drain the full buffer (DMA back-pressure).
   std::atomic<uint32_t> diag_i2s0_short_writes_{0};
+  // Cumulative HTTP connections released after a failed/cancelled open: all, TLS only.
+  std::atomic<uint32_t> diag_http_cancel_close_{0};
+  std::atomic<uint32_t> diag_http_cancel_close_tls_{0};
+  std::atomic<uint32_t> diag_http_stale_close_{0};
+  std::atomic<uint32_t> diag_http_stale_close_tls_{0};
+  std::atomic<uint32_t> diag_gmf_settle_waits_{0};
+  std::atomic<uint32_t> diag_gmf_settle_max_ms_{0};
+  std::atomic<uint32_t> diag_gmf_settle_timeouts_{0};
+  std::atomic<uint32_t> diag_gmf_stop_retries_{0};
+  std::atomic<uint32_t> diag_gmf_stop_unconfirmed_{0};
   unsigned long diag_last_report_ms_{0};
 
   // Pin configuration

@@ -319,14 +319,24 @@ void InternetRadio::loop() {
       uint32_t bridge_errors = this->diag_bridge_errors_.exchange(0);
       uint32_t bridge_short_writes = this->diag_bridge_short_writes_.exchange(0);
       uint32_t i2s0_short = this->diag_i2s0_short_writes_.exchange(0);
-      ESP_LOGI(TAG, "Runtime diag: internal=%u min=%u largest=%u psram=%u loop_us=%lu gap_ms=%lu control=%d reset=%d announce=%d rx=%d voice=%d",
+      ESP_LOGI(TAG, "Runtime diag: internal=%u min=%u largest=%u psram=%u loop_us=%lu gap_ms=%lu control=%d reset=%d announce=%d rx=%d voice=%d "
+               "http_close=cancel:%lu,%lu stale:%lu,%lu gmf_settle=%lu,%lu,%lu gmf_stop=%lu,%lu",
                unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
                unsigned(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
                unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)),
                unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)),
                (unsigned long) this->diag_loop_max_us_, (unsigned long) this->diag_loop_gap_max_ms_,
                int(this->player_command_pending_()), int(esp_reset_reason()),
-               int(this->announcing_), int(this->rx_enabled_), int(this->voice_active_));
+               int(this->announcing_), int(this->rx_enabled_), int(this->voice_active_),
+               (unsigned long) this->diag_http_cancel_close_.load(),
+               (unsigned long) this->diag_http_cancel_close_tls_.load(),
+               (unsigned long) this->diag_http_stale_close_.load(),
+               (unsigned long) this->diag_http_stale_close_tls_.load(),
+               (unsigned long) this->diag_gmf_settle_waits_.load(),
+               (unsigned long) this->diag_gmf_settle_max_ms_.load(),
+               (unsigned long) this->diag_gmf_settle_timeouts_.load(),
+               (unsigned long) this->diag_gmf_stop_retries_.load(),
+               (unsigned long) this->diag_gmf_stop_unconfirmed_.load());
       const size_t failed = failed_alloc_size.exchange(0);
       if (failed)
         ESP_LOGW(TAG, "Allocation failed: size=%u caps=0x%lx internal=%u largest=%u",
@@ -678,12 +688,36 @@ int InternetRadio::icy_read_(esp_http_client_handle_t client, char *out, int out
 
 int InternetRadio::http_event_cb_(http_stream_event_msg_t *msg) {
   auto *self = static_cast<InternetRadio *>(msg->user_data);
+  auto client = static_cast<esp_http_client_handle_t>(msg->http_client);
+  if (msg->event_id == HTTP_STREAM_PRE_REQUEST && client) {
+    // When an open fails after connecting (cancelled ON_REQUEST, bad status), GMF skips
+    // the IO close ("Failed on prepare") and reuses the client on the next open, where
+    // esp_http_client_open() connects again over the live transport and leaks its socket
+    // and TLS session. Release any such connection before the new request.
+    const int stale_fd = esp_http_client_get_socket(client);
+    if (stale_fd >= 0) {
+      ESP_LOGW(TAG, "Closing stale HTTP connection left by a failed open (fd %d)", stale_fd);
+      self->diag_http_stale_close_++;
+      if (esp_http_client_get_transport_type(client) == HTTP_TRANSPORT_OVER_SSL)
+        self->diag_http_stale_close_tls_++;
+      esp_http_client_close(client);
+      esp_http_client_clear_response_buffer(client);
+    }
+  }
   // Every hook of a superseded stream fails, including reconnects and redirects.
-  if (self->http_fence_("hook") < 0) return -1;
+  if (self->http_fence_("hook") < 0) {
+    // A failed ON_REQUEST is not followed by an IO close; drop the connection now.
+    if (client && msg->event_id == HTTP_STREAM_ON_REQUEST) {
+      self->diag_http_cancel_close_++;
+      if (esp_http_client_get_transport_type(client) == HTTP_TRANSPORT_OVER_SSL)
+        self->diag_http_cancel_close_tls_++;
+      esp_http_client_close(client);
+    }
+    return -1;
+  }
 
   if (msg->event_id == HTTP_STREAM_PRE_REQUEST) {
     // Request ICY metadata from Icecast/Shoutcast servers
-    auto client = static_cast<esp_http_client_handle_t>(msg->http_client);
     esp_http_client_set_header(client, "Icy-MetaData", "1");
     // Reset ICY state for new connection
     self->icy_metaint_ = 0;
@@ -697,7 +731,6 @@ int InternetRadio::http_event_cb_(http_stream_event_msg_t *msg) {
   }
 
   if (msg->event_id == HTTP_STREAM_ON_RESPONSE) {
-    auto client = static_cast<esp_http_client_handle_t>(msg->http_client);
 
     // GMF fetches response headers before dispatching its first read callback.
     if (!self->icy_header_checked_) {
@@ -902,6 +935,16 @@ void InternetRadio::write_bridge_pcm_(const uint8_t *data, int size) {
 
 int InternetRadio::player_event_cb_(esp_asp_event_pkt_t *pkt, void *ctx) {
   auto *self = static_cast<InternetRadio *>(ctx);
+  if (pkt->type == ESP_ASP_EVENT_TYPE_STATE) {
+    // Also for superseded runs: this callback runs on GMF's thread before it winds down.
+    const esp_asp_state_t state = *(esp_asp_state_t *)pkt->payload;
+    if (state == ESP_ASP_STATE_ERROR || state == ESP_ASP_STATE_FINISHED) {
+      self->gmf_task_.store(xTaskGetCurrentTaskHandle());
+      self->gmf_settle_pending_.store(true);
+    }
+    if (state == ESP_ASP_STATE_ERROR || state == ESP_ASP_STATE_FINISHED || state == ESP_ASP_STATE_STOPPED)
+      self->gmf_ended_.store(true);
+  }
   if (!self->accept_player_events_.load()) return 0;
 
   if (pkt->type == ESP_ASP_EVENT_TYPE_MUSIC_INFO) {
@@ -1057,6 +1100,48 @@ bool InternetRadio::request_player_(PlayerOperation operation, const char *uri, 
   return true;
 }
 
+// After a failed open, GMF reports ERROR from its own thread and only then deletes the
+// task's job list. A RUN registered in between loses its jobs and times out after 5 s
+// ("Run timeout"). Wait until that thread is parked again (blocked waiting for a run).
+void InternetRadio::wait_gmf_parked_() {
+  if (!this->gmf_settle_pending_.exchange(false)) return;
+  TaskHandle_t task = this->gmf_task_.load();
+  if (task == nullptr) return;
+  const uint32_t start = millis();
+  int parked = 0;
+  while (parked < 3 && millis() - start < 500) {
+    const eTaskState state = eTaskGetState(task);
+    parked = (state == eBlocked || state == eSuspended) ? parked + 1 : 0;
+    if (parked < 3) vTaskDelay(1);
+  }
+  const uint32_t ms = millis() - start;
+  this->diag_gmf_settle_waits_++;
+  if (ms > this->diag_gmf_settle_max_ms_.load()) this->diag_gmf_settle_max_ms_.store(ms);
+  if (parked < 3) {
+    this->diag_gmf_settle_timeouts_++;
+    ESP_LOGW(TAG, "GMF task still busy %lu ms after its run ended", (unsigned long) ms);
+  }
+}
+
+// GMF sets the task's STOP bit when a run ends by itself (ERROR/FINISHED or failed
+// prepare) and clears it only once the next run reaches its job loop. A stop issued while
+// that next run is still opening its input consumes the stale bit and returns OK at once,
+// while the pipeline keeps running; the following RUN then times out after 5 s. A real
+// stop always reports STOPPED/FINISHED/ERROR before it returns, so stop again if not.
+esp_gmf_err_t InternetRadio::stop_pipeline_(bool launched) {
+  esp_gmf_err_t result = esp_audio_simple_player_stop(this->player_);
+  if (result == ESP_GMF_ERR_OK && launched && !this->gmf_ended_.load()) {
+    this->diag_gmf_stop_retries_++;
+    ESP_LOGW(TAG, "GMF stop returned while the run was still opening; stopping again");
+    result = esp_audio_simple_player_stop(this->player_);
+    if (result == ESP_GMF_ERR_OK && !this->gmf_ended_.load()) {
+      this->diag_gmf_stop_unconfirmed_++;
+      ESP_LOGE(TAG, "GMF stop not confirmed by a terminal pipeline event");
+    }
+  }
+  return result;
+}
+
 static const char *player_op_name(int op) {
   static const char *const names[] = {"STOP", "RUN", "PAUSE", "RESUME"};
   return op >= 0 && op < 4 ? names[op] : "?";
@@ -1066,17 +1151,20 @@ void InternetRadio::player_control_task_(void *arg) {
   auto *self = static_cast<InternetRadio *>(arg);
   PlayerCommand command{};
   playback_logic::PipelineStopTracker pipeline;
+  bool launched = false;  // the last run returned OK and has not been stopped since
   for (;;) {
     if (xQueueReceive(self->player_commands_, &command, portMAX_DELAY) != pdTRUE) continue;
     const uint32_t start = millis();
     esp_gmf_err_t result = ESP_GMF_ERR_OK;
     if (command.operation == PlayerOperation::RUN || command.operation == PlayerOperation::STOP) {
       self->accept_player_events_.store(false);
+      self->wait_gmf_parked_();
       // Stop even after ERROR: the HTTP/decoder workers can still own resources.
       // Never stop twice in a row (superseded RUN): see PipelineStopTracker.
       if (pipeline.needs_stop()) {
-        result = esp_audio_simple_player_stop(self->player_);
+        result = self->stop_pipeline_(launched);
         pipeline.stop_result(result == ESP_GMF_ERR_OK);
+        launched = false;
       }
       self->player_running_ = false;
       if (command.announcement) {
@@ -1111,7 +1199,9 @@ void InternetRadio::player_control_task_(void *arg) {
         }
       }
       if (run) {
+        self->gmf_ended_.store(false);
         result = esp_audio_simple_player_run(self->player_, command.uri, nullptr);
+        launched = result == ESP_GMF_ERR_OK;
         esp_gmf_pipeline_handle_t pipe = nullptr;
         pipeline.run_attempted(esp_audio_simple_player_get_pipeline(self->player_, &pipe) == ESP_GMF_ERR_OK &&
                                pipe != nullptr);
@@ -1150,8 +1240,9 @@ void InternetRadio::player_control_task_(void *arg) {
         }
       }
       if (cleanup_stop && pipeline.needs_stop()) {
-        const esp_gmf_err_t stop_result = esp_audio_simple_player_stop(self->player_);
+        const esp_gmf_err_t stop_result = self->stop_pipeline_(launched);
         pipeline.stop_result(stop_result == ESP_GMF_ERR_OK);
+        launched = false;
         self->player_running_ = false;
         if (stop_result == ESP_GMF_ERR_OK)
           ESP_LOGW(TAG, "Pipeline stopped after failed %s", player_op_name(int(command.operation)));
