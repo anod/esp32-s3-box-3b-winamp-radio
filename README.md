@@ -185,6 +185,129 @@ station selection and metadata still use the custom radio backend.
 These remain migration work before adopting ESPHome's
 standard audio sources; Sendspin is not enabled by this preparation.
 
+### Native audio migration experiment
+
+`experiments/native-audio.yaml` is a separate BOX-3 probe using ESPHome
+2026.11.0b2's native full-duplex I2S, a 48 kHz speaker/microphone bus, 16 kHz
+microphone resampling, a standard media player/mixer/output resamplers, and custom
+GMF HTTP sources for AAC/MP3 and ICY titles. Separate software gain adapters keep
+radio volume/mute away from the shared DAC and fixed-level voice output. Radio-only
+FFT capture taps accepted PCM before gain, including while radio output is muted.
+It does **not** replace the working radio or provide Sendspin, the display or voice
+assistant yet. Bluetooth is a separate experimental probe.
+
+```bash
+python3 tools/ha_native_build.py compile
+python3 tools/ha_native_build.py status
+# Experimental I2S1 variant; full-load/soak validation remains:
+python3 tools/ha_native_build.py compile --bluetooth
+# Add standard wake-word/assistant ownership (optionally with I2S1):
+python3 tools/ha_native_build.py compile --voice --bluetooth
+ESPHOME_NATIVE_BETA=/path/to/isolated/beta/bin/esphome \
+  python3 -m unittest discover -s tests -p test_native_audio.py -v
+```
+
+The helper installs the pinned beta requirements into a separate virtual
+environment under `/data/radio-native-beta/` inside the existing HA Device
+Builder. The stable add-on stays on 2026.10.2. It shares the stable build lock
+and resource checks, uses one compile job, links only HA's existing secrets,
+and records checksums for both the OTA binary and ELF. Configuration, logs and
+source snapshots live under `/config/esphome/radio-native-beta/`, with build
+artifacts under `/data/radio-native-beta/build/`. There is deliberately no
+upload action; a beta flash requires separate permission and a verified stable
+rollback artifact.
+
+For an authorized hardware trial, start **Probe Microphone** and exercise
+playback, pause, stop/idle and announcements on **Probe Player**. The amplifier
+starts **off**; enable **Probe Amplifier** only for listening. At steady state,
+`native_probe` logs should show about 192,000 raw microphone bytes/s, 32,000
+resampled bytes/s, and 48,000 speaker frames/s during playback. Mic peak checks
+require an unmuted hardware microphone. Heap, low-water, largest free block,
+PSRAM and loop-time sensors accompany the logs. Counters do not prove audible
+quality or clock continuity: those require hardware trials. `Probe Phase` changes
+from connecting to playing only after actual DAC playback, not buffer acceptance.
+The shared DAC stays at unity/unmuted; radio mute and volume zero do not silence
+fixed-gain announcements. GMF handles both HTTP pipelines because its codec archive
+and ESPHome's standard HTTP MP3 decoder export conflicting decoder symbols.
+
+Hardware trial on 2026-11-09 passed on beta firmware compiled at 15:10:40 +0200
+(OTA SHA-256 `09aba5c2…6882cf63`): 48 kHz stereo microphone capture and 16 kHz
+resampling continued through MP3 playback, pause/resume, stop/idle and a
+three-second announcement. Settled speaker output was 48,000 frames/s, and
+stopping microphone capture did not stop playback. The native-only probe had
+180,636 bytes minimum free heap and a 131,072-byte minimum largest block.
+One STOP operation blocked the main loop for 319 ms (323 ms maximum loop time);
+this remains a responsiveness concern for the full UI/wake workload.
+Reports and logs are in `.esphome/hardware/native-beta-confirm.*`. The amplifier
+was off, so audible fidelity was not verified. The stable firmware and original
+station, volume/mute, Bluetooth and wake settings were restored and PCM checked.
+Subsequent native GMF trials passed MP3/HTTPS AAC, ICY titles, pause/resume,
+independent radio/announcement gain, six invalid/404 recoveries, slow-stream
+cancellation and the actual-PCM startup deadline. Control remained off the main
+loop (55 ms maximum measured loop time). A later spectrum-only trial passed the
+same duplex/gain baseline with a 68 ms maximum loop time. Reports are
+`.esphome/hardware/native-gmf-{trial,lifecycle}.*` and `native-spectrum-isolation.*`.
+Stable firmware and original settings were restored after every trial.
+
+The isolated I2S1 probe initially crashed and rolled back at boot. USB logs from
+the Windows host (attached to WSL using usbipd) identified switch restoration
+calling `ResamplerSpeaker::stop()` before the resampler's event group existed.
+The gain adapter now stops only taps it has actually started; no I2S driver
+changes were needed. A reversible routing trial on firmware compiled
+2026-11-09 21:48:24 +0200 (OTA SHA-256 `c47f059e…9889ea98`) then passed:
+simultaneous 48 kHz internal output, 44.1 kHz bridge output and continuous mic,
+pre-gain FFT while muted, fixed-gain announcements, three BT toggles, and
+standalone voice output restricted to I2S0. Settled measurement windows had no
+tap drops; startup/toggle/announcement transitions did log drops, so this is not
+a lossless-output guarantee. Baseline loop time peaked at 75 ms. Evidence is in
+`.esphome/hardware/native-routing-usb-fixed.*`; the boot capture is
+`native-routing-usb.serial.log`. Stable firmware and settings were restored.
+The variant remains separate from the default probe. Its PCM tap is nonblocking,
+reports dropped bytes explicitly, and does not receive voice PCM.
+Bluetooth clock drift, audible output, full wake/assistant/UI load and the long
+soak remain readiness gates. A2DP latency is not Sendspin group synchronization.
+
+`experiments/native-audio-voice.yaml` adds standard `micro_wake_word` (`okay_nabu`)
+and `voice_assistant` on the same native 16 kHz microphone resampler. Wake starts
+only when **Probe Wake Word** is enabled, and stops during sessions and replies.
+**Probe Ask Assistant** / **Probe Stop Assistant** exercise the real HA pipeline;
+**Probe Voice Begin** / **Probe Voice End** exercise the shared session scripts
+without requiring speech. A session locally ducks the radio, pauses only the
+GMF radio source, enables the internal amplifier and waits for reply buffers to
+drain before restoring playback and the previous amplifier state. Follow-up
+sessions cancel pending restoration; an initially paused or explicitly stopped
+radio is not restarted. This is a diagnostic configuration, not production
+session/source arbitration: cues, display, standalone-announcement PA ownership
+and Sendspin's **local duck without group pause** still need integration.
+
+The native probe disables **hardware SHA acceleration**, not certificate
+verification. Repeated HTTP/voice-to-HTTPS trials exposed incorrect PSA
+SHA-256 certificate digests despite a successful hash return; temporary
+diagnostics compared them with the independent libsodium software implementation.
+TLS-first trials passed, but the reuse sequence failed even after wake stopped,
+with ample heap and stack. The experiment therefore selects ESP-IDF's software
+SHA implementation and the build helper checks the compiled SDK configuration.
+The stable production configuration is unchanged.
+
+Voice trials passed the shared native microphone/wake load for two 180-second
+windows, fixed-gain reply/radio restoration, follow-up cancellation, preservation
+of a manually paused radio and STOP during a session. Bluetooth dropped 148 and
+69,408 tap bytes respectively during those windows, so sustained losslessness
+has **not** passed. Separate HTTPS-first trials passed all six AAC/MP3 cases
+with wake on/off; real HA Assist reached `listening`, then stopped and restored
+the radio. This does not verify spoken wake detection, STT or audible replies.
+
+The combined voice gate is still **blocked by HTTP-to-HTTPS source reuse**.
+The software-SHA image (compiled 2026-11-09 23:46:31 +0200, OTA SHA-256
+`4e790532…10994ca0`) no longer logged the certificate-signature error in that
+sequence, but it stalled during HTTP open, hit the actual-PCM startup deadline
+and then the control-timeout quarantine. HTTPS-first playback on the same image
+passed. Do not treat the SHA change as a complete fix or relax the deadlines.
+Evidence: `.esphome/hardware/native-voice-{trial,confirm,tls,tls-sequence}.*`,
+`native-voice-psa{,-hash}.*`, `native-voice-tls-software-{sha,first}.*`.
+Stable firmware, original settings and actual radio PCM were restored after
+every trial. Display/cues, full source arbitration and the long soak remain open.
+
 ### Phase 1 (preparation) status
 
 Accepted on firmware compiled 2026-11-08 10:20:45 +0200 (ESPHome 2026.10.2, ESP-IDF

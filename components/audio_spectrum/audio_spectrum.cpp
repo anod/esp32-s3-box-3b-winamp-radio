@@ -1,28 +1,28 @@
 // ─── FFT spectrum analyser ────────────────────────────────
-// Core 0 callback only accumulates mono samples (very lightweight).
-// Core 1 runs the FFT in draw_frame_() — no audio-path overhead.
+// Core 0 accumulates mono samples and publishes a short, mutex-protected snapshot.
+// Core 1 performs the FFT after releasing that mutex.
 //
 // This file must NOT include Audio.h — the weak attribute would
 // taint our strong definition (same rule as audio_process_i2s.cpp).
 //
 // Self-contained 128-point radix-2 FFT — no esp_dsp dependency.
-// Uses only <math.h> and <string.h>.
 
 #include <math.h>
 #include <string.h>
 #include <stdint.h>
+#include <mutex>
+#include "audio_spectrum.h"
 
 static constexpr int FFT_N = 128;
 static constexpr int VIZ_BANDS = 16;
 
 // ── Core 0 side: lightweight sample capture ──
-// Double-buffered: Core 0 writes to buf[write_buf_], flips when full.
-// Core 1 reads buf[1 - write_buf_] (the completed buffer).
-static float sample_bufs[2][FFT_N];
-static volatile int write_buf_ = 0;     // which buffer Core 0 is filling
-static volatile int accum_idx = 0;
-static volatile bool sample_ready = false;   // true when a full buffer is available
-static volatile bool spectrum_ready = false; // init guard
+static float accumulator[FFT_N];
+static float latest_samples[FFT_N];
+static int accum_idx = 0;
+static std::mutex sample_mutex;
+static bool sample_ready = false;
+static bool spectrum_ready = false;
 
 // ── Core 1 side: FFT computation ──
 static float fft_input[FFT_N * 2];    // interleaved Re/Im
@@ -88,13 +88,15 @@ void spectrum_init() {
 // Called from Core 1 (draw_frame_) — runs FFT on latest completed sample buffer.
 // Returns true if new data was computed.
 bool spectrum_compute() {
-  if (!sample_ready) return false;
-  sample_ready = false;
-
-  // Read the completed buffer (the one Core 0 is NOT writing to)
-  int read_buf = 1 - write_buf_;
+  float snapshot[FFT_N];
+  {
+    std::lock_guard<std::mutex> lock(sample_mutex);
+    if (!sample_ready) return false;
+    memcpy(snapshot, latest_samples, sizeof(snapshot));
+    sample_ready = false;
+  }
   for (int i = 0; i < FFT_N; i++) {
-    fft_input[i * 2]     = sample_bufs[read_buf][i] * fft_window[i];
+    fft_input[i * 2]     = snapshot[i] * fft_window[i];
     fft_input[i * 2 + 1] = 0.0f;
   }
 
@@ -120,22 +122,23 @@ bool spectrum_compute() {
 // Called from PCM output callback (Core 0) — lightweight sample capture.
 // Mixes stereo 16-bit PCM to mono, fills double-buffered accumulator.
 void feed_fft_samples(const uint8_t *data, int size) {
-  if (!spectrum_ready) return;
+  feed_fft_samples(data, size, 2);
+}
 
+void feed_fft_samples(const uint8_t *data, int size, int channels) {
+  if (!spectrum_ready || (channels != 1 && channels != 2)) return;
   const int16_t *samples = reinterpret_cast<const int16_t *>(data);
-  int num_frames = size / 4;  // 16-bit stereo = 4 bytes per frame
+  int num_frames = size / (2 * channels);
 
-  int wb = write_buf_;
   for (int i = 0; i < num_frames; i++) {
-    // Mix stereo to mono (average left + right), normalize to [-1, 1]
-    float mono = (float)(samples[i * 2] + samples[i * 2 + 1]) * (0.5f / 32768.0f);
-    sample_bufs[wb][accum_idx] = mono;
+    const int left = samples[i * channels];
+    const int right = channels == 2 ? samples[i * channels + 1] : left;
+    accumulator[accum_idx] = float(left + right) * (0.5f / 32768.0f);
     accum_idx++;
     if (accum_idx >= FFT_N) {
       accum_idx = 0;
-      // Flip buffer BEFORE signaling ready — ensures consumer reads completed buffer
-      write_buf_ = 1 - wb;
-      wb = write_buf_;
+      std::lock_guard<std::mutex> lock(sample_mutex);
+      memcpy(latest_samples, accumulator, sizeof(latest_samples));
       sample_ready = true;
     }
   }

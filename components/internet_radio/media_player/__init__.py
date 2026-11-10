@@ -9,6 +9,7 @@ from esphome.components.esp32 import add_idf_component
 from esphome import pins
 
 DEPENDENCIES = ["network", "i2c"]
+AUTO_LOAD = ["gmf_audio"]
 
 InternetRadio = internet_radio_ns.class_(
     "InternetRadio", media_player.MediaPlayer, cg.Component
@@ -56,8 +57,6 @@ async def to_code(config):
     esp32.include_builtin_idf_component("esp_driver_i2s")
     esp32.include_builtin_idf_component("esp_http_client")
 
-    # ESP-GMF audio pipeline (HTTP → decoder → PCM output callback)
-    add_idf_component(name="espressif/esp_audio_simple_player", ref="0.9.6~1")
     # ES8311 codec driver (register-level control via I2C).
     # 1.5.10 is compatible with the native ESP-IDF toolchain.
     add_idf_component(name="espressif/esp_codec_dev", ref="1.5.10")

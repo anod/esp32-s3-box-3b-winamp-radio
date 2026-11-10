@@ -16,6 +16,7 @@
 #include "esphome/components/number/number.h"
 #include "esphome/components/media_player/media_player.h"
 #include "esphome/components/switch/switch.h"
+#include "esphome/components/audio_spectrum/audio_spectrum.h"
 
 #include <LovyanGFX.hpp>
 
@@ -59,11 +60,6 @@ class LGFX final : public lgfx::LGFX_Device {
   lgfx::Bus_SPI bus_;
   lgfx::Light_PWM light_;
 };
-
-// Spectrum analyser — Core 0 captures samples, Core 1 runs FFT
-extern float spec_bands[16];
-void spectrum_init();
-bool spectrum_compute();  // call from draw_frame_ before reading spec_bands
 
 // Forward declarations to avoid including full headers
 namespace esphome {

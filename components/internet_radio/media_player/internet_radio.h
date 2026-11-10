@@ -13,6 +13,7 @@
 #include "esphome/components/media_player/media_player.h"
 #include "esphome/components/text_sensor/text_sensor.h"
 #include "esphome/components/select/select.h"
+#include "esphome/components/gmf_audio/http_transport.h"
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -173,13 +174,9 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   std::atomic<uint32_t> playback_start_ms_{0};
   unsigned long player_command_ms_{0};
   // HTTP cancellation: stream_epoch_ advances on every STOP/RUN request (Core 1);
-  // http_epoch_ is the epoch the running pipeline was launched with (worker).
+  // The shared transport fences callbacks against the worker's launched epoch.
   std::atomic<uint32_t> stream_epoch_{0};
-  std::atomic<uint32_t> http_epoch_{0};
-  std::atomic<uint32_t> http_cancel_logged_{0};
-  bool http_cancelled_() const { return this->http_epoch_.load() != this->stream_epoch_.load(); }
-  int http_fence_(const char *where);
-  int http_read_(esp_http_client_handle_t client, char *buf, int len);
+  gmf_audio::HttpTransport http_transport_;
   bool player_command_pending_() const {
     return this->player_generation_.load() != this->player_completed_.load();
   }
@@ -192,11 +189,6 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   // ESP-GMF callbacks (static, Core 0)
   static int pcm_output_cb_(uint8_t *data, int size, void *ctx);
   static int player_event_cb_(esp_asp_event_pkt_t *pkt, void *ctx);
-  static int http_event_cb_(http_stream_event_msg_t *msg);
-
-  // ICY metadata helpers (Core 0)
-  void parse_icy_metadata_();
-  int icy_read_(esp_http_client_handle_t client, char *out, int out_len);
 
   // ESP-GMF player handle
   esp_asp_handle_t player_{nullptr};
@@ -204,15 +196,6 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
 
   // HTTP IO handle (custom, with cert bundle)
   esp_gmf_io_handle_t http_io_{nullptr};
-
-  // ICY metadata state (accessed only on Core 0 HTTP IO thread)
-  int icy_metaint_{0};           // bytes between metadata blocks (0 = no ICY)
-  int icy_remaining_{0};         // audio bytes left before next metadata block
-  int icy_meta_remaining_{0};    // metadata bytes left to skip/collect
-  int icy_meta_idx_{0};          // current write position in icy_meta_buf_
-  bool icy_header_checked_{false}; // true after first response checks headers
-  bool http_owns_reads_{false};    // callback performs cancellable body reads
-  char icy_meta_buf_[512]{};     // metadata text buffer
 
   // ES8311 codec interface (direct calls, no esp_codec_dev wrapper)
   const audio_codec_if_t *codec_if_{nullptr};
@@ -267,11 +250,6 @@ class InternetRadio final : public media_player::MediaPlayer, public Component {
   std::atomic<uint32_t> diag_bridge_short_writes_{0};
   // Counts I2S0 writes that didn't drain the full buffer (DMA back-pressure).
   std::atomic<uint32_t> diag_i2s0_short_writes_{0};
-  // Cumulative HTTP connections released after a failed/cancelled open: all, TLS only.
-  std::atomic<uint32_t> diag_http_cancel_close_{0};
-  std::atomic<uint32_t> diag_http_cancel_close_tls_{0};
-  std::atomic<uint32_t> diag_http_stale_close_{0};
-  std::atomic<uint32_t> diag_http_stale_close_tls_{0};
   std::atomic<uint32_t> diag_gmf_settle_waits_{0};
   std::atomic<uint32_t> diag_gmf_settle_max_ms_{0};
   std::atomic<uint32_t> diag_gmf_settle_timeouts_{0};

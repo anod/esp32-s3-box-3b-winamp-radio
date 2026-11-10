@@ -1,0 +1,257 @@
+# Isolated BOX-3 duplex experiment, not a replacement for esp32radio.yaml.
+esphome:
+  name: radio-native-beta-probe
+  friendly_name: Radio Native Audio Probe
+  min_version: 2026.11.0b2
+  on_boot:
+    priority: -100
+    then:
+      - lambda: |-
+          id(radio_gain).set_pre_gain_tap([](const uint8_t *data, size_t length,
+                                            const audio::AudioStreamInfo &info) {
+            feed_fft_samples(data, length, info.get_channels());
+          });
+          id(native_speaker).add_audio_output_callback([](uint32_t frames, int64_t timestamp) {
+            static uint32_t total = 0;
+            static int64_t previous = 0;
+            total += frames;
+            if (previous == 0) {
+              previous = timestamp;
+              total = 0;
+            } else if (timestamp - previous >= 1000000) {
+              ESP_LOGI("native_probe", "Speaker: frames=%u elapsed_us=%lld", static_cast<unsigned>(total),
+                       static_cast<long long>(timestamp - previous));
+              previous = timestamp;
+              total = 0;
+            }
+          });
+
+esp32:
+  board: esp32s3box
+  toolchain: esp-idf
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+    version: 6.0.1
+    sdkconfig_options:
+      CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU0: "y"
+      # Hardware SHA produced incorrect TLS certificate hashes after GMF source reuse.
+      CONFIG_MBEDTLS_HARDWARE_SHA: "n"
+
+logger:
+  level: DEBUG
+
+api:
+  encryption:
+    key: !secret esp32radio_api_key
+
+ota:
+  - platform: esphome
+    password: !secret esp32radio_ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: none
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+external_components:
+  - source:
+      type: local
+      path: ../components
+    components: [audio_gain, gmf_audio, audio_spectrum]
+
+audio_spectrum:
+
+debug:
+  update_interval: 5s
+
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          if (spectrum_compute()) {
+            float peak = 0;
+            for (float band : spec_bands) peak = std::max(peak, band);
+            ESP_LOGI("native_probe", "Spectrum: peak=%.4f", peak);
+          }
+          ESP_LOGI("native_probe", "DAC volume_q8=%d muted=%d",
+                   static_cast<int>(id(native_speaker).get_volume() * 256),
+                   static_cast<int>(id(native_speaker).get_mute_state()));
+
+sensor:
+  - platform: uptime
+    name: Probe Uptime
+    update_interval: 5s
+  - platform: debug
+    free:
+      name: Probe Heap Free
+    block:
+      name: Probe Heap Largest Block
+    min_free:
+      name: Probe Heap Low Water
+    loop_time:
+      name: Probe Loop Time
+    psram:
+      name: Probe PSRAM Free
+
+i2c:
+  sda: 8
+  scl: 18
+  scan: false
+
+audio_dac:
+  - platform: es8311
+    id: codec_out
+    bits_per_sample: 16bit
+    sample_rate: 48000
+
+audio_adc:
+  - platform: es7210
+    id: codec_in
+    bits_per_sample: 16bit
+    sample_rate: 48000
+
+i2s_audio:
+  - id: duplex
+    i2s_bclk_pin: 17
+    i2s_lrclk_pin: 45
+    i2s_mclk_pin: 2
+    full_duplex: true
+
+microphone:
+  - platform: i2s_audio
+    id: native_mic
+    i2s_audio_id: duplex
+    i2s_din_pin: 16
+    adc_type: external
+    sample_rate: 48000
+    bits_per_sample: 16bit
+    channel: stereo
+    on_data:
+      - lambda: |-
+          static uint32_t bytes = 0;
+          static uint32_t previous = 0;
+          const uint32_t now = millis();
+          bytes += x.size();
+          if (previous == 0) {
+            previous = now;
+            bytes = 0;
+          } else if (now - previous >= 1000) {
+            ESP_LOGI("native_probe", "Mic raw: bytes=%u elapsed_ms=%u",
+                     static_cast<unsigned>(bytes), static_cast<unsigned>(now - previous));
+            previous = now;
+            bytes = 0;
+          }
+  - platform: resampler
+    id: mic_16k
+    microphone:
+      microphone: native_mic
+      channels: [0]
+    sample_rate: 16000
+    on_data:
+      - lambda: |-
+          static uint32_t bytes = 0;
+          static uint32_t previous = 0;
+          static int peak = 0;
+          const uint32_t now = millis();
+          bytes += x.size();
+          for (size_t i = 0; i + 1 < x.size(); i += 2) {
+            int16_t sample;
+            memcpy(&sample, x.data() + i, sizeof(sample));
+            const int magnitude = sample < 0 ? -static_cast<int>(sample) : sample;
+            if (magnitude > peak) peak = magnitude;
+          }
+          if (previous == 0) {
+            previous = now;
+            bytes = 0;
+            peak = 0;
+          } else if (now - previous >= 1000) {
+            ESP_LOGI("native_probe", "Mic 16k: bytes=%u elapsed_ms=%u peak=%d",
+                     static_cast<unsigned>(bytes), static_cast<unsigned>(now - previous), peak);
+            previous = now;
+            bytes = 0;
+            peak = 0;
+          }
+
+switch:
+  - platform: gpio
+    id: amplifier
+    name: Probe Amplifier
+    pin: 46
+    restore_mode: ALWAYS_OFF
+  - platform: template
+    name: Probe Microphone
+    lambda: return id(mic_16k).is_running();
+    turn_on_action:
+      - microphone.capture: mic_16k
+    turn_off_action:
+      - microphone.stop_capture: mic_16k
+
+speaker:
+  - platform: i2s_audio
+    id: native_speaker
+    i2s_audio_id: duplex
+    i2s_dout_pin: 15
+    dac_type: external
+    audio_dac: codec_out
+    sample_rate: 48000
+    bits_per_sample: 16bit
+    channel: stereo
+  - platform: mixer
+    id: mixer_output
+    output_speaker: native_speaker
+    source_speakers:
+      - id: radio_stream
+      - id: voice_stream
+  - platform: resampler
+    id: radio_resampler
+    output_speaker: radio_stream
+  - platform: resampler
+    id: voice_resampler
+    output_speaker: voice_stream
+  - platform: audio_gain
+    id: radio_gain
+    output_speaker: radio_resampler
+  - platform: audio_gain
+    id: voice_gain
+    output_speaker: voice_resampler
+    fixed_gain: 31.640625%
+
+media_source:
+  - platform: gmf_audio
+    id: media_http
+    title_id: probe_title
+    phase_id: probe_phase
+  - platform: gmf_audio
+    id: announcement_http
+
+text_sensor:
+  - platform: template
+    id: probe_title
+    name: Probe Title
+    update_interval: never
+  - platform: template
+    id: probe_phase
+    name: Probe Phase
+    update_interval: never
+
+media_player:
+  - platform: speaker_source
+    id: probe_player
+    name: Probe Player
+    media_pipeline:
+      speaker: radio_gain
+      sources: [media_http]
+      format: MP3
+      sample_rate: 48000
+      num_channels: 2
+    announcement_pipeline:
+      speaker: voice_gain
+      sources: [announcement_http]
+      format: MP3
+      sample_rate: 48000
+      num_channels: 2

@@ -2,7 +2,7 @@
 #include <cstdlib>
 #include <cstring>
 #include "esp_heap_caps.h"
-#include "../../components/internet_radio/media_player/codec_memory.cpp"
+#include "../../components/gmf_audio/codec_memory.cpp"
 
 static void check_caps(uint32_t caps) {
   assert(caps == (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));

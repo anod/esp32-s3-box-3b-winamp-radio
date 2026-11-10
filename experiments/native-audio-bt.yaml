@@ -1,0 +1,55 @@
+# Isolated I2S1 probe: short routing trial passed; full-load/soak validation remains.
+packages:
+  base: !include native-audio.yaml
+
+esphome:
+  on_boot:
+    priority: -100
+    then:
+      - lambda: |-
+          id(bridge_speaker).add_audio_output_callback([](uint32_t frames, int64_t timestamp) {
+            static uint32_t total = 0;
+            static int64_t previous = 0;
+            total += frames;
+            if (previous == 0) {
+              previous = timestamp;
+              total = 0;
+            } else if (timestamp - previous >= 1000000) {
+              ESP_LOGI("native_probe", "Bridge: frames=%u elapsed_us=%lld", static_cast<unsigned>(total),
+                       static_cast<long long>(timestamp - previous));
+              previous = timestamp;
+              total = 0;
+            }
+          });
+
+i2s_audio:
+  - id: bridge_bus
+    i2s_bclk_pin: 10
+    i2s_lrclk_pin: 14
+
+speaker:
+  - platform: i2s_audio
+    id: bridge_speaker
+    i2s_audio_id: bridge_bus
+    i2s_dout_pin: 11
+    dac_type: external
+    sample_rate: 44100
+    bits_per_sample: 16bit
+    channel: stereo
+    buffer_duration: 100ms
+  - platform: resampler
+    id: bridge_resampler
+    output_speaker: bridge_speaker
+    sample_rate: 44100
+  - id: !extend radio_gain
+    tap_speaker: bridge_resampler
+
+switch:
+  - platform: template
+    id: bridge_enabled
+    name: Probe Bluetooth
+    lambda: return id(radio_gain).is_tap_enabled();
+    turn_on_action:
+      - lambda: id(radio_gain).set_tap_enabled(true);
+    turn_off_action:
+      - lambda: id(radio_gain).set_tap_enabled(false);

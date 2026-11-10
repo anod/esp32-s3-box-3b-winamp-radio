@@ -30,6 +30,48 @@ ESPHome-based internet radio for the ESP32-S3-BOX-3. Uses ESP-IDF framework with
   and leaves the existing HA radio config and secrets unchanged.
 - Keep ESPHome 2026.10.2 and native ESP-IDF 6.0.1 for the current milestone.
   Do not flash, restart HA, or change USB passthrough without user permission.
+- Native audio experiments use `experiments/native-audio.yaml` and
+  `python3 tools/ha_native_build.py compile`: isolated ESPHome 2026.11.0b2 in
+  the same HA container, separate build/config paths, no add-on upgrade or upload.
+  The probe is not feature-equivalent to the radio; beta OTA needs explicit
+  permission and a verified stable rollback artifact.
+- Native duplex was hardware-tested on 2026-11-09: mic capture continued through
+  playback/pause/stop, and speaker output continued after mic stop. Stable radio
+  was restored. Stock `speaker_source` STOP blocked the main loop for 319 ms;
+  the new GMF source keeps control off the main loop. Native GMF AAC/MP3/ICY and
+  independent radio/fixed voice gain passed later hardware trials (55 ms max loop);
+  shared pre-gain spectrum capture passed a separate trial (68 ms max loop).
+  Native wake/UI load and audible fidelity are not yet validated.
+- `experiments/native-audio-bt.yaml` / `ha_native_build.py compile --bluetooth`
+  is an isolated experimental I2S1 variant. Windows USB -> WSL boot logs proved
+  the initial rollback was an uninitialized resampler event group: template
+  switch restoration called `set_tap_enabled(false)` before speaker setup.
+  Stop/finish a PCM tap only after it has actually been started, not merely
+  because it is configured. No I2S driver workaround was needed.
+  A short reversible routing trial passed (48 kHz internal, 44.1 kHz BT, continuous
+  mic, muted FFT, BT toggles and internal-only voice). Settled windows had no tap
+  drops, but transitions did. Full-load/soak and audible validation remain;
+  do not treat it as Sendspin-ready. HA's Zigbee dongle is NOT the radio console.
+- `experiments/native-audio-voice.yaml` adds standard wake/assistant clients on
+  the shared native 16 kHz mic. Build with `--voice` (and optionally `--bluetooth`).
+  Its test session scripts are not production source arbitration: GMF is paused
+  locally, but future Sendspin must be ducked without pausing its group.
+- Native HTTP/voice-to-HTTPS reuse exposed incorrect hardware SHA-256 digests:
+  PSA returned success but disagreed with independent libsodium hashing.
+  The native probe sets `CONFIG_MBEDTLS_HARDWARE_SHA=n`; retain certificate
+  verification and the CA bundle. Do not mask failures with insecure TLS,
+  automatic retries or higher timeouts. Stable production configuration is unchanged.
+- Native voice/wake session checks and real HA Assist start/listen/stop passed
+  individually. Combined readiness is still blocked: HTTP/voice -> first HTTPS
+  reuse fails (hardware SHA: incorrect certificate digests; software SHA: open
+  stalls, startup/control timeouts). HTTPS-first AAC/MP3 passed six cases on
+  each image. Do not claim the SHA setting alone fixes reuse. Two 180-second
+  wake+BT windows also dropped 148 / 69,408 tap bytes. Full display/cues, actual
+  spoken wake/STT/reply and long soak are not validated. All trials restored Phase1.
+- The phase-1 rollback binary and metadata are preserved independently in
+  `/data/radio-native-beta/rollback/phase1/`, with an immutable source wrapper at
+  `/config/esphome/esp32radio-rollback-phase1.yaml`. Verify its recorded SHA before
+  `esphome upload --file`; rebuilding development firmware must not replace it.
 
 ### Component Layout
 
@@ -40,7 +82,7 @@ components/
 ├── internet_radio/              # Parent namespace package
 │   ├── __init__.py              # Defines internet_radio_ns
 │   └── media_player/
-│       ├── __init__.py          # Schema, codegen, IDF component deps
+│       ├── __init__.py          # Schema, codegen, codec deps
 │       ├── internet_radio.h     # MediaPlayer subclass
 │       ├── internet_radio.cpp   # ESP-GMF pipeline, ICY metadata, volume
 ├── i2s_bridge/
@@ -50,12 +92,15 @@ components/
 │       ├── i2s_bridge.h         # Switch subclass + static state
 │       ├── i2s_bridge.cpp       # I2S1 TX channel management
 │       └── audio_process_i2s.cpp  # Weak override (MUST be separate TU)
+├── gmf_audio/                  # Shared codec allocator, HTTP/ICY and lifecycle;
+│                               # beta-only native MediaSource
+├── audio_gain/                 # Independent software gain; accepted radio PCM taps
+├── audio_spectrum/             # Shared PCM capture + host-tested FFT
 └── winamp_display/
     ├── __init__.py              # Schema, codegen, LovyanGFX + esp_lcd
     ├── winamp_display.h         # Component + I2CDevice
     ├── winamp_display.cpp       # Rendering (~200 LOC draw_frame_)
     ├── winamp_touch.cpp         # Touch via ESPHome I2C bus
-    └── spectrum.cpp             # FFT visualizer (separate TU)
 ```
 
 ### Core Threading Model
@@ -68,7 +113,10 @@ components/
 
 ### Cross-Core Communication
 
-- **Song title double-buffer**: `std::atomic<int> title_read_idx_` with acquire/release ordering. Core 0 writes to `title_bufs_[1 - idx]`, then `store(wi, release)`. Core 1 reads `title_bufs_[idx.load(acquire)]`. No mutex needed.
+- **Song titles**: shared HTTP/ICY metadata uses an epoch-fenced mutex mailbox;
+  Core 1 transfers it to the legacy title buffers. GMF ID3 still updates those
+  double buffers on Core 0, publishing `title_read_idx_` with release ordering.
+  Readers use acquire ordering. New stream requests clear pending ICY metadata.
 - **Volume**: `volatile int sw_vol_gain_` (Q8 fixed-point). Core 1 writes, Core 0 reads in `pcm_output_cb_`. Single-word atomic on ESP32.
 - **Play state**: `volatile PlayState play_state_` updated by both cores (Core 0 via `player_event_cb_`, Core 1 via `control()`).
 - **Frame counter**: `volatile uint32_t g_audio_frame_count` incremented in `pcm_output_cb_` on Core 0, read by `loop()` on Core 1 for underrun watchdog.
@@ -79,9 +127,12 @@ Split across two cores for zero audio-path overhead:
 
 - **Core 0** (`feed_fft_samples` called from `pcm_output_cb_`): Lightweight sample capture — mixes stereo to mono, fills double-buffered accumulator, flips buffer when 128 samples collected. ~microseconds per callback.
 - **Core 1** (`spectrum_compute()` called from `draw_frame_`): Reads completed sample buffer, runs 128-point radix-2 FFT, aggregates into 16 logarithmic frequency bands (magnitude²). ~100μs — negligible within 55-78ms frame time.
-- **Double buffer**: `sample_bufs[2][128]` with volatile `write_buf_` index. Core 0 writes to one buffer, Core 1 reads the other. `sample_ready` flag set last as release signal.
+- **Snapshot mailbox**: Core 0 fills a private 128-sample accumulator and copies
+  completed blocks under a short mutex. Core 1 snapshots under that mutex, then
+  releases it before FFT computation. It never races a producer reusing a buffer.
 - **No esp_dsp dependency**: Self-contained FFT using only `<math.h>`. Pre-computed Hann window and twiddle factors.
-- `feed_fft_samples` and `audio_process_i2s` MUST live in their own `.cpp` files — weak-symbol overrides require separate translation units.
+- `feed_fft_samples` lives in `audio_spectrum/audio_spectrum.cpp`; both its legacy
+  stereo entry point and native mono/stereo entry point remain strong symbols.
 
 ### Software Volume
 

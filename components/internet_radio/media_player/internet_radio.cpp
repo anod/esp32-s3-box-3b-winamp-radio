@@ -26,10 +26,12 @@ extern void feed_fft_samples(const uint8_t *data, int size);
 // Read by loop() on Core 1 for underrun detection.
 volatile uint32_t g_audio_frame_count = 0;
 
+namespace esphome::gmf_audio {
+void initialize_codec_memory();
+}
+
 namespace esphome {
 namespace internet_radio {
-
-void initialize_codec_memory();
 
 static const char *const TAG = "internet_radio";
 static std::atomic<size_t> failed_alloc_size{0};
@@ -328,10 +330,10 @@ void InternetRadio::loop() {
                (unsigned long) this->diag_loop_max_us_, (unsigned long) this->diag_loop_gap_max_ms_,
                int(this->player_command_pending_()), int(esp_reset_reason()),
                int(this->announcing_), int(this->rx_enabled_), int(this->voice_active_),
-               (unsigned long) this->diag_http_cancel_close_.load(),
-               (unsigned long) this->diag_http_cancel_close_tls_.load(),
-               (unsigned long) this->diag_http_stale_close_.load(),
-               (unsigned long) this->diag_http_stale_close_tls_.load(),
+               (unsigned long) this->http_transport_.cancel_close.load(),
+               (unsigned long) this->http_transport_.cancel_close_tls.load(),
+               (unsigned long) this->http_transport_.stale_close.load(),
+               (unsigned long) this->http_transport_.stale_close_tls.load(),
                (unsigned long) this->diag_gmf_settle_waits_.load(),
                (unsigned long) this->diag_gmf_settle_max_ms_.load(),
                (unsigned long) this->diag_gmf_settle_timeouts_.load(),
@@ -378,6 +380,10 @@ void InternetRadio::loop() {
   this->flush_vol_if_dirty_();
 
   // Publish state changes to HA (reads from stable title buffer)
+  const int title_write = 1 - this->title_read_idx_.load(std::memory_order_relaxed);
+  if (this->http_transport_.take_title(this->title_bufs_[title_write], sizeof(this->title_bufs_[0])))
+    this->title_read_idx_.store(title_write, std::memory_order_release);
+  if (this->http_transport_.bitrate() > 0) this->bitrate_ = this->http_transport_.bitrate();
   const char *title = this->title_bufs_[this->title_read_idx_.load(std::memory_order_acquire)];
   bool title_changed = strcmp(title, this->last_published_title_) != 0;
   bool announcing_now = this->announcing_;
@@ -515,7 +521,7 @@ void InternetRadio::init_es8311_() {
 }
 
 void InternetRadio::init_player_() {
-  initialize_codec_memory();
+  gmf_audio::initialize_codec_memory();
   esp_asp_cfg_t cfg = {};
   cfg.out.cb = pcm_output_cb_;
   cfg.out.user_ctx = this;
@@ -550,8 +556,8 @@ void InternetRadio::init_http_io_() {
   http_io_cfg_t http_cfg = HTTP_STREAM_CFG_DEFAULT();
   http_cfg.dir = ESP_GMF_IO_DIR_READER;
   http_cfg.crt_bundle_attach = esp_crt_bundle_attach;
-  http_cfg.event_handle = http_event_cb_;
-  http_cfg.user_data = this;
+  http_cfg.event_handle = gmf_audio::HttpTransport::event;
+  http_cfg.user_data = &this->http_transport_;
 
   // Enlarge the upstream network→decoder ring buffer (allocated in PSRAM).
   // The GMF default (20KB ≈ 1.25s @128kbps) starves the decoder during the
@@ -568,211 +574,6 @@ void InternetRadio::init_http_io_() {
   }
   esp_audio_simple_player_register_io(this->player_, this->http_io_);
   ESP_LOGI(TAG, "HTTP IO registered (HTTPS cert bundle enabled)");
-}
-
-// ─── HTTP event callback (Core 0) — ICY metadata extraction ──
-
-// Extract StreamTitle from ICY metadata block, publish to title double-buffer.
-void InternetRadio::parse_icy_metadata_() {
-  icy_meta_buf_[icy_meta_idx_] = '\0';
-  if (icy_meta_idx_ == 0) return;
-
-  const char *st = strstr(icy_meta_buf_, "StreamTitle='");
-  if (!st) return;
-  st += 13;  // skip "StreamTitle='"
-  const char *end = strstr(st, "';");
-  int len = end ? (int)(end - st) : (int)strlen(st);
-  if (len <= 0 || len >= 128) return;
-
-  // Write to double-buffer (Core 0 → Core 1 via acquire/release)
-  int wi = 1 - title_read_idx_.load(std::memory_order_relaxed);
-  if (strncmp(title_bufs_[wi], st, len) == 0 && title_bufs_[wi][len] == '\0') return;
-  memcpy(title_bufs_[wi], st, len);
-  title_bufs_[wi][len] = '\0';
-  title_read_idx_.store(wi, std::memory_order_release);
-  ESP_LOGI(TAG, "ICY: %s", title_bufs_[wi]);
-}
-
-// GMF's HTTP reader (esp_gmf_io_http.c) blocks in esp_http_client_read() until the
-// whole 3 KB chunk arrives; its client timeout (30 s) only fires when the socket is
-// completely idle, so a dribbling server kept the IO task, the decoder (blocked on the
-// data bus) and therefore esp_audio_simple_player_stop() alive indefinitely. The body
-// is read here instead: after the response headers the client poll timeout is lowered,
-// partial data is returned on a quiet gap, and every poll checks the stream epoch.
-// The 30 s idle limit is preserved for real stalls.
-static constexpr int HTTP_READ_POLL_MS = 200;
-static constexpr uint32_t HTTP_IDLE_TIMEOUT_MS = 30000;
-
-// GMF hook return semantics (gmf_io 0.8.1): PRE_REQUEST != 0, ON_REQUEST < 0 and
-// POST_REQUEST < 0 abort the open; ON_RESPONSE > 0 is the byte count, 0 lets GMF read,
-// < 0 is a read error. A read error makes GMF close and reopen the connection, and that
-// reopen fails at PRE_REQUEST, so the IO task ends with IO_FAIL, aborts the data bus and
-// the pipeline unwinds without contacting the server again.
-int InternetRadio::http_fence_(const char *where) {
-  if (!this->http_cancelled_()) return 0;
-  const uint32_t epoch = this->http_epoch_.load();
-  if (this->http_cancel_logged_.exchange(epoch) != epoch)
-    ESP_LOGW(TAG, "HTTP stream cancelled at %s (epoch %lu superseded by %lu)", where,
-             (unsigned long) epoch, (unsigned long) this->stream_epoch_.load());
-  return -1;
-}
-
-// Returns >0 bytes (possibly fewer than len after a quiet gap), 0 at end of body,
-// <0 on error, cancellation or HTTP_IDLE_TIMEOUT_MS without any data.
-int InternetRadio::http_read_(esp_http_client_handle_t client, char *buf, int len) {
-  const uint32_t idle_start = millis();
-  for (;;) {
-    if (this->http_fence_("read") < 0) return -1;
-    const int rd = esp_http_client_read(client, buf, len);
-    if (rd != -ESP_ERR_HTTP_EAGAIN || millis() - idle_start >= HTTP_IDLE_TIMEOUT_MS) return rd;
-  }
-}
-
-// Read from HTTP stream, stripping interleaved ICY metadata.
-// Returns bytes of clean audio written to out, 0 on EOF, -1 on error.
-int InternetRadio::icy_read_(esp_http_client_handle_t client, char *out, int out_len) {
-  int out_pos = 0;
-  int last_rd = 0;
-
-  while (out_pos < out_len) {
-    if (icy_meta_remaining_ > 0) {
-      // Inside metadata block — consume into icy_meta_buf_
-      char tmp[256];
-      int to_read = icy_meta_remaining_;
-      if (to_read > (int)sizeof(tmp)) to_read = (int)sizeof(tmp);
-      last_rd = this->http_read_(client, tmp, to_read);
-      if (last_rd <= 0) break;
-      int space = (int)sizeof(icy_meta_buf_) - 1 - icy_meta_idx_;
-      if (space > 0) {
-        int n = last_rd < space ? last_rd : space;
-        memcpy(icy_meta_buf_ + icy_meta_idx_, tmp, n);
-        icy_meta_idx_ += n;
-      }
-      icy_meta_remaining_ -= last_rd;
-      if (icy_meta_remaining_ <= 0) {
-        parse_icy_metadata_();
-        icy_meta_idx_ = 0;
-        icy_remaining_ = icy_metaint_;
-      }
-      continue;
-    }
-
-    if (icy_remaining_ == 0) {
-      // Read 1-byte metadata length prefix
-      char len_byte = 0;
-      last_rd = this->http_read_(client, &len_byte, 1);
-      if (last_rd <= 0) break;
-      int meta_len = (uint8_t)len_byte * 16;
-      if (meta_len > 0) {
-        icy_meta_remaining_ = meta_len;
-        icy_meta_idx_ = 0;
-      } else {
-        icy_remaining_ = icy_metaint_;
-      }
-      continue;
-    }
-
-    // Read audio data up to next metadata boundary
-    int want = out_len - out_pos;
-    if (icy_remaining_ < want) want = icy_remaining_;
-    last_rd = this->http_read_(client, out + out_pos, want);
-    if (last_rd <= 0) break;
-    out_pos += last_rd;
-    icy_remaining_ -= last_rd;
-    if (last_rd < want) break;  // quiet gap: hand the audio over now
-  }
-
-  if (out_pos > 0) return out_pos;
-  return last_rd < 0 ? -1 : 0;  // propagate EOF vs error
-}
-
-int InternetRadio::http_event_cb_(http_stream_event_msg_t *msg) {
-  auto *self = static_cast<InternetRadio *>(msg->user_data);
-  auto client = static_cast<esp_http_client_handle_t>(msg->http_client);
-  if (msg->event_id == HTTP_STREAM_PRE_REQUEST && client) {
-    // When an open fails after connecting (cancelled ON_REQUEST, bad status), GMF skips
-    // the IO close ("Failed on prepare") and reuses the client on the next open, where
-    // esp_http_client_open() connects again over the live transport and leaks its socket
-    // and TLS session. Release any such connection before the new request.
-    const int stale_fd = esp_http_client_get_socket(client);
-    if (stale_fd >= 0) {
-      ESP_LOGW(TAG, "Closing stale HTTP connection left by a failed open (fd %d)", stale_fd);
-      self->diag_http_stale_close_++;
-      if (esp_http_client_get_transport_type(client) == HTTP_TRANSPORT_OVER_SSL)
-        self->diag_http_stale_close_tls_++;
-      esp_http_client_close(client);
-      esp_http_client_clear_response_buffer(client);
-    }
-  }
-  // Every hook of a superseded stream fails, including reconnects and redirects.
-  if (self->http_fence_("hook") < 0) {
-    // A failed ON_REQUEST is not followed by an IO close; drop the connection now.
-    if (client && msg->event_id == HTTP_STREAM_ON_REQUEST) {
-      self->diag_http_cancel_close_++;
-      if (esp_http_client_get_transport_type(client) == HTTP_TRANSPORT_OVER_SSL)
-        self->diag_http_cancel_close_tls_++;
-      esp_http_client_close(client);
-    }
-    return -1;
-  }
-
-  if (msg->event_id == HTTP_STREAM_PRE_REQUEST) {
-    // Request ICY metadata from Icecast/Shoutcast servers
-    esp_http_client_set_header(client, "Icy-MetaData", "1");
-    // Reset ICY state for new connection
-    self->icy_metaint_ = 0;
-    self->bitrate_ = 0;
-    self->icy_remaining_ = 0;
-    self->icy_meta_remaining_ = 0;
-    self->icy_meta_idx_ = 0;
-    self->icy_header_checked_ = false;
-    self->http_owns_reads_ = false;
-    return 0;
-  }
-
-  if (msg->event_id == HTTP_STREAM_ON_RESPONSE) {
-
-    // GMF fetches response headers before dispatching its first read callback.
-    if (!self->icy_header_checked_) {
-      self->icy_header_checked_ = true;
-      char *header_value = nullptr;
-      int metaint = 0;
-      if (esp_http_client_get_response_header(client, "icy-metaint", &header_value) == ESP_OK &&
-          header_value != nullptr) {
-        metaint = std::atoi(header_value);
-      }
-      if (metaint > 0) {
-        self->icy_metaint_ = metaint;
-        self->icy_remaining_ = metaint;
-        ESP_LOGI(TAG, "ICY metaint: %d bytes", metaint);
-      } else {
-        ESP_LOGD(TAG, "No ICY metadata in response");
-      }
-      header_value = nullptr;
-      int br = 0;
-      if (esp_http_client_get_response_header(client, "icy-br", &header_value) == ESP_OK &&
-          header_value != nullptr) {
-        br = std::atoi(header_value);
-      }
-      if (br > 0) {
-        self->bitrate_ = br;
-        ESP_LOGI(TAG, "ICY bitrate: %d kbps", br);
-      }
-      // gzip bodies must go through GMF's inflater; everything else is read here.
-      header_value = nullptr;
-      const bool gzip = esp_http_client_get_response_header(client, "Content-Encoding", &header_value) == ESP_OK &&
-                        header_value != nullptr && strstr(header_value, "gzip") != nullptr;
-      self->http_owns_reads_ = self->icy_metaint_ > 0 || !gzip;
-      if (self->http_owns_reads_) esp_http_client_set_timeout_ms(client, HTTP_READ_POLL_MS);
-    }
-
-    if (self->icy_metaint_ > 0)
-      return self->icy_read_(client, static_cast<char *>(msg->buffer), msg->buffer_len);
-    if (!self->http_owns_reads_) return 0;  // let GMF inflate gzip itself
-    return self->http_read_(client, static_cast<char *>(msg->buffer), msg->buffer_len);
-  }
-
-  return 0;
 }
 
 // ─── PCM output callback (Core 0, ESP-GMF worker thread) ─
@@ -1079,12 +880,16 @@ bool InternetRadio::request_player_(PlayerOperation operation, const char *uri, 
     this->play_state_ = PS_STOPPED;
     this->pa_pending_ = false;
     this->stream_failed_ = false;
-    if (operation == PlayerOperation::RUN) this->announcing_ = announcement;
+    if (operation == PlayerOperation::RUN) {
+      this->announcing_ = announcement;
+      this->bitrate_ = 0;
+    }
     this->playback_requested_.store(operation == PlayerOperation::RUN);
     this->playback_launched_.store(false);
     this->pcm_started_.store(false);
     // Cancels the HTTP reader of the running stream before the worker even wakes.
     command.stream_epoch = this->stream_epoch_.fetch_add(1) + 1;
+    this->http_transport_.set_epoch(command.stream_epoch);
   } else if (operation == PlayerOperation::PAUSE) {
     // Record the paused intent now: a voice session or announcement arriving before
     // the worker applies the PAUSE must not resume the radio afterwards.
@@ -1186,7 +991,7 @@ void InternetRadio::player_control_task_(void *arg) {
             self->announcing_ = command.announcement;
             self->pcm_enabled_.store(true);
             self->accept_player_events_.store(true);
-            self->http_epoch_.store(command.stream_epoch);
+            self->http_transport_.launch(command.stream_epoch);
             // Startup clock starts at the actual launch, not at request time.
             self->playback_start_ms_.store(millis());
             self->playback_launched_.store(true);
@@ -1234,7 +1039,7 @@ void InternetRadio::player_control_task_(void *arg) {
           if (playback_logic::needs_cleanup_stop(failed_op)) {
             // GMF state is unknown after a failed pause/resume: fence the HTTP reader
             // and stop the pipeline here, still inside this serialized command.
-            self->stream_epoch_.fetch_add(1);
+            self->http_transport_.set_epoch(self->stream_epoch_.fetch_add(1) + 1);
             cleanup_stop = true;
           }
         }

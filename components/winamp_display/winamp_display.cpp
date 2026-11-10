@@ -320,7 +320,6 @@ void WinampDisplay::setup() {
   }
 
   // Initialize FFT tables (must happen before audio starts streaming)
-  spectrum_init();
 
   // Initial draw
   this->draw_frame_();

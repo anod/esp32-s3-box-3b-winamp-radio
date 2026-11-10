@@ -1,8 +1,8 @@
 #include <cassert>
 #include <cstring>
-#include "../../components/internet_radio/media_player/playback_logic.h"
+#include "../../components/gmf_audio/playback_logic.h"
 
-using namespace esphome::internet_radio::playback_logic;
+using namespace esphome::gmf_audio::playback_logic;
 
 static void test_pipeline_stop_tracker() {
   PipelineStopTracker pipeline;

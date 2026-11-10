@@ -1,0 +1,176 @@
+# Native wake/assistant ownership trial; not the production voice configuration.
+packages:
+  base: !include native-audio.yaml
+
+globals:
+  - id: probe_voice_active
+    type: bool
+    initial_value: "false"
+  - id: probe_voice_resume
+    type: bool
+    initial_value: "false"
+  - id: probe_voice_amp
+    type: bool
+    initial_value: "false"
+
+micro_wake_word:
+  id: probe_wake
+  microphone:
+    microphone: mic_16k
+    gain_factor: 4
+  stop_after_detection: true
+  models:
+    - model: okay_nabu
+      probability_cutoff: 0.9
+  on_wake_word_detected:
+    - script.execute: probe_voice_begin
+    - voice_assistant.start:
+
+voice_assistant:
+  id: probe_assistant
+  microphone:
+    microphone: mic_16k
+    gain_factor: 4
+  media_player: probe_player
+  on_start:
+    - script.execute: probe_voice_begin
+    - text_sensor.template.publish:
+        id: probe_voice_state
+        state: starting
+  on_listening:
+    - text_sensor.template.publish:
+        id: probe_voice_state
+        state: listening
+  on_stt_end:
+    - text_sensor.template.publish:
+        id: probe_voice_heard
+        state: !lambda return x;
+    - text_sensor.template.publish:
+        id: probe_voice_state
+        state: thinking
+  on_tts_start:
+    - text_sensor.template.publish:
+        id: probe_voice_reply
+        state: !lambda return x;
+  on_tts_end:
+    - text_sensor.template.publish:
+        id: probe_voice_state
+        state: replying
+  on_end:
+    - script.execute: probe_voice_end
+  on_idle:
+    - script.execute: probe_voice_end
+  on_error:
+    - lambda: |-
+        ESP_LOGE("native_voice", "Assistant error %s: %s", code.c_str(), message.c_str());
+        id(probe_voice_reply).publish_state(message);
+        id(probe_voice_state).publish_state("error");
+    - script.execute: probe_voice_end
+  on_client_disconnected:
+    - voice_assistant.stop:
+    - script.execute: probe_voice_end
+
+script:
+  - id: probe_voice_begin
+    mode: restart
+    then:
+      - script.stop: probe_voice_end
+      - micro_wake_word.stop:
+      - lambda: |-
+          if (!id(probe_voice_active)) {
+            id(probe_voice_resume) =
+                id(media_http).get_state() == media_source::MediaSourceState::PLAYING;
+            id(probe_voice_amp) = id(amplifier).state;
+            id(probe_voice_active) = true;
+            id(radio_gain).set_ducked(true);
+            if (id(probe_voice_resume))
+              id(media_http).handle_command(media_source::MediaSourceCommand::PAUSE);
+          }
+          id(amplifier).turn_on();
+          id(probe_voice_state).publish_state("starting");
+          ESP_LOGI("native_voice", "Session begin: resume=%d", id(probe_voice_resume));
+  - id: probe_voice_end
+    mode: single
+    then:
+      - delay: 500ms
+      - wait_until:
+          condition:
+            lambda: |-
+              return !id(probe_assistant).is_running() &&
+                     id(announcement_http).get_state() == media_source::MediaSourceState::IDLE &&
+                     id(voice_gain).is_stopped() && !id(voice_gain).has_buffered_data();
+          timeout: 30s
+      - lambda: |-
+          if (!id(probe_voice_active)) return;
+          if (id(probe_assistant).is_running() ||
+              id(announcement_http).get_state() != media_source::MediaSourceState::IDLE ||
+              !id(voice_gain).is_stopped() || id(voice_gain).has_buffered_data()) {
+            ESP_LOGE("native_voice", "Session end timed out; retaining local duck and amplifier");
+            id(probe_voice_state).publish_state("restore_timeout");
+            return;
+          }
+          const bool resume = id(probe_voice_resume) &&
+              id(media_http).get_state() == media_source::MediaSourceState::PAUSED;
+          id(probe_voice_resume) = false;
+          id(probe_voice_active) = false;
+          id(radio_gain).set_ducked(false);
+          if (resume)
+            id(media_http).handle_command(media_source::MediaSourceCommand::PLAY);
+          if (!id(probe_voice_amp)) id(amplifier).turn_off();
+          id(probe_voice_state).publish_state("idle");
+          ESP_LOGI("native_voice", "Session end: resumed=%d", resume);
+
+switch:
+  - platform: template
+    id: probe_wake_enabled
+    name: Probe Wake Word
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+
+button:
+  - platform: template
+    name: Probe Ask Assistant
+    on_press:
+      - script.execute: probe_voice_begin
+      - voice_assistant.start:
+  - platform: template
+    name: Probe Stop Assistant
+    on_press:
+      - voice_assistant.stop:
+      - script.execute: probe_voice_end
+  - platform: template
+    name: Probe Voice Begin
+    on_press:
+      - script.execute: probe_voice_begin
+  - platform: template
+    name: Probe Voice End
+    on_press:
+      - script.execute: probe_voice_end
+
+text_sensor:
+  - platform: template
+    id: probe_voice_state
+    name: Probe Voice State
+    update_interval: never
+  - platform: template
+    id: probe_voice_heard
+    name: Probe Voice Heard
+    update_interval: never
+  - platform: template
+    id: probe_voice_reply
+    name: Probe Voice Reply
+    update_interval: never
+
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          const bool want = id(probe_wake_enabled).state && !id(probe_voice_active) &&
+              !id(probe_assistant).is_running() &&
+              id(announcement_http).get_state() == media_source::MediaSourceState::IDLE &&
+              id(voice_gain).is_stopped();
+          if (want && !id(probe_wake).is_running()) id(probe_wake).start();
+          if (!want && id(probe_wake).is_running()) id(probe_wake).stop();
+          ESP_LOGI("native_voice", "Wake running=%d session=%d assistant=%d",
+                   id(probe_wake).is_running(), id(probe_voice_active),
+                   id(probe_assistant).is_running());

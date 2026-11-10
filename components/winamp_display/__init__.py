@@ -7,6 +7,7 @@ from esphome.components import i2c, number, switch
 
 CODEOWNERS = ["@alexg"]
 DEPENDENCIES = ["i2c", "media_player", "switch"]
+AUTO_LOAD = ["audio_spectrum"]
 
 winamp_display_ns = cg.esphome_ns.namespace("winamp_display")
 WinampDisplay = winamp_display_ns.class_(

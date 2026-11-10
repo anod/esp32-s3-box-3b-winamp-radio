@@ -2,7 +2,7 @@
 #include "esp_heap_caps.h"
 
 namespace esphome {
-namespace internet_radio {
+namespace gmf_audio {
 // Pull this translation unit out of the component archive before weak codec hooks resolve.
 void initialize_codec_memory() {}
 }
