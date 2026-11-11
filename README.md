@@ -280,14 +280,18 @@ radio is not restarted. This is a diagnostic configuration, not production
 session/source arbitration: cues, display, standalone-announcement PA ownership
 and Sendspin's **local duck without group pause** still need integration.
 
-The native probe disables **hardware SHA acceleration**, not certificate
+The native probe disables **hardware SHA and AES acceleration**, not certificate
 verification. Repeated HTTP/voice-to-HTTPS trials exposed incorrect PSA
 SHA-256 certificate digests despite a successful hash return; temporary
 diagnostics compared them with the independent libsodium software implementation.
 TLS-first trials passed, but the reuse sequence failed even after wake stopped,
-with ample heap and stack. The experiment therefore selects ESP-IDF's software
-SHA implementation and the build helper checks the compiled SDK configuration.
-The stable production configuration is unchanged.
+with ample heap and stack. Software SHA alone removed the signature error but
+still stalled during the handshake. An upstream I2S/crypto corruption report,
+[espressif/esp-idf#18640](https://github.com/espressif/esp-idf/issues/18640),
+motivated testing software AES as well; its proposed GDMA root cause is not
+confirmed here. The experiment selects both software implementations and the
+build helper checks the compiled SDK configuration. The CA bundle, certificate
+verification, startup/control deadlines and stable production config are unchanged.
 
 Voice trials passed the shared native microphone/wake load for two 180-second
 windows, fixed-gain reply/radio restoration, follow-up cancellation, preservation
@@ -297,14 +301,24 @@ has **not** passed. Separate HTTPS-first trials passed all six AAC/MP3 cases
 with wake on/off; real HA Assist reached `listening`, then stopped and restored
 the radio. This does not verify spoken wake detection, STT or audible replies.
 
-The combined voice gate is still **blocked by HTTP-to-HTTPS source reuse**.
-The software-SHA image (compiled 2026-11-09 23:46:31 +0200, OTA SHA-256
-`4e790532…10994ca0`) no longer logged the certificate-signature error in that
-sequence, but it stalled during HTTP open, hit the actual-PCM startup deadline
-and then the control-timeout quarantine. HTTPS-first playback on the same image
-passed. Do not treat the SHA change as a complete fix or relax the deadlines.
-Evidence: `.esphome/hardware/native-voice-{trial,confirm,tls,tls-sequence}.*`,
+The software-AES/SHA image (compiled 2026-11-11 00:11:06 +0200, OTA SHA-256
+`4cb93917…9343bb84`) passed the previously failing first HTTPS AAC start after
+HTTP/voice, followed by two further HTTPS starts with wake on/off. Each reached
+actual DAC PCM and stopped successfully with no errors. This is a validated
+experimental mitigation, not an upstream driver fix or full Sendspin readiness.
+Evidence: `.esphome/hardware/native-crypto-reuse.*`.
+Four further HTTP/voice -> HTTPS AAC -> HTTPS MP3 cycles (12 media starts,
+wake on/off, Bluetooth enabled) also completed without errors or timeouts:
+`.esphome/hardware/native-crypto-transitions.*`.
+Earlier failing sequence evidence remains in
+`.esphome/hardware/native-voice-{trial,confirm,tls,tls-sequence}.*`,
 `native-voice-psa{,-hash}.*`, `native-voice-tls-software-{sha,first}.*`.
+The same software-AES/SHA image also passed the combined voice lifecycle:
+reply drain/resume, follow-up cancellation, paused/STOP preservation, HTTPS AAC
+under wake load, and real HA Assist listening/stop/restore, with no error logs.
+Its 180-second wake+BT window maintained at least 99.3% microphone and 99.9%
+internal-output cadence, but still dropped 37,008 tap bytes; Bluetooth
+losslessness remains blocked. Evidence: `.esphome/hardware/native-crypto-voice.*`.
 Stable firmware, original settings and actual radio PCM were restored after
 every trial. Display/cues, full source arbitration and the long soak remain open.
 

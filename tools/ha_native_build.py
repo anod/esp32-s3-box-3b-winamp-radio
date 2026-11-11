@@ -134,8 +134,9 @@ try:
     generated = (build / "src/main.cpp").read_text()
     defines = (build / "src/esphome/core/defines.h").read_text()
     sdkconfig = (build / "build/config/sdkconfig.h").read_text()
-    if "#define CONFIG_MBEDTLS_HARDWARE_SHA 1" in sdkconfig:
-        raise RuntimeError("Probe linked with known-failing hardware SHA enabled")
+    for accelerator in ("SHA", "AES"):
+        if f"#define CONFIG_MBEDTLS_HARDWARE_{accelerator} 1" in sdkconfig:
+            raise RuntimeError(f"Probe linked with known-failing hardware {accelerator} enabled")
     if ("#define USE_I2S_AUDIO_FULL_DUPLEX" not in defines or
             "#define USE_GMF_MEDIA_SOURCE" not in defines or
             "duplex->set_audio_in(native_mic)" not in generated or

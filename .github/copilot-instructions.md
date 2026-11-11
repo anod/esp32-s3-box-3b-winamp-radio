@@ -58,15 +58,21 @@ ESPHome-based internet radio for the ESP32-S3-BOX-3. Uses ESP-IDF framework with
   locally, but future Sendspin must be ducked without pausing its group.
 - Native HTTP/voice-to-HTTPS reuse exposed incorrect hardware SHA-256 digests:
   PSA returned success but disagreed with independent libsodium hashing.
-  The native probe sets `CONFIG_MBEDTLS_HARDWARE_SHA=n`; retain certificate
+  The native probe sets `CONFIG_MBEDTLS_HARDWARE_SHA=n` and
+  `CONFIG_MBEDTLS_HARDWARE_AES=n`; retain certificate
   verification and the CA bundle. Do not mask failures with insecure TLS,
   automatic retries or higher timeouts. Stable production configuration is unchanged.
 - Native voice/wake session checks and real HA Assist start/listen/stop passed
-  individually. Combined readiness is still blocked: HTTP/voice -> first HTTPS
-  reuse fails (hardware SHA: incorrect certificate digests; software SHA: open
-  stalls, startup/control timeouts). HTTPS-first AAC/MP3 passed six cases on
-  each image. Do not claim the SHA setting alone fixes reuse. Two 180-second
-  wake+BT windows also dropped 148 / 69,408 tap bytes. Full display/cues, actual
+  individually. Earlier HTTP/voice -> first HTTPS reuse failed (hardware SHA:
+  incorrect certificate digests; software SHA alone: open stalls/timeouts).
+  Software AES plus SHA passed that sequence and subsequent wake on/off HTTPS
+  starts on 2026-11-11, plus four HTTP/voice -> HTTPS AAC -> HTTPS MP3 cycles
+  (12 media starts). Do not re-enable either accelerator without repeating them.
+  Upstream espressif/esp-idf#18640 reports similar I2S/crypto corruption, but its GDMA
+  hypothesis is not proven here. Two earlier 180-second
+  wake+BT windows also dropped 148 / 69,408 tap bytes. The software-AES/SHA
+  combined voice/Assist lifecycle passed, but its 180s window still dropped
+  37,008 tap bytes. Full display/cues, actual
   spoken wake/STT/reply and long soak are not validated. All trials restored Phase1.
 - The phase-1 rollback binary and metadata are preserved independently in
   `/data/radio-native-beta/rollback/phase1/`, with an immutable source wrapper at

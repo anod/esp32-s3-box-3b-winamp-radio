@@ -35,8 +35,9 @@ esp32:
     version: 6.0.1
     sdkconfig_options:
       CONFIG_LWIP_TCPIP_TASK_AFFINITY_CPU0: "y"
-      # Hardware SHA produced incorrect TLS certificate hashes after GMF source reuse.
+      # I2S/crypto corruption after audio: espressif/esp-idf#18640.
       CONFIG_MBEDTLS_HARDWARE_SHA: "n"
+      CONFIG_MBEDTLS_HARDWARE_AES: "n"
 
 logger:
   level: DEBUG
