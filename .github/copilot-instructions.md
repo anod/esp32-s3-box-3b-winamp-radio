@@ -49,9 +49,17 @@ ESPHome-based internet radio for the ESP32-S3-BOX-3. Uses ESP-IDF framework with
   Stop/finish a PCM tap only after it has actually been started, not merely
   because it is configured. No I2S driver workaround was needed.
   A short reversible routing trial passed (48 kHz internal, 44.1 kHz BT, continuous
-  mic, muted FFT, BT toggles and internal-only voice). Settled windows had no tap
-  drops, but transitions did. Full-load/soak and audible validation remain;
-  do not treat it as Sendspin-ready. HA's Zigbee dongle is NOT the radio console.
+  mic, muted FFT, BT toggles and internal-only voice). The native probe now has a
+  bounded 128 KiB PSRAM tap queue and 500 ms BT buffers; GMF pause/stop resets
+  the tap and natural finish drains it. The GMF lifecycle callback must be wired
+  separately for other sources; Sendspin must never pause its group for local voice.
+  Wake/BT ran 180 seconds without tap overflow; finite 44.1/48 kHz clip frame
+  counts were checked at I2S1. Three instrumented voice reply windows had no BT
+  frames and BT resumed; format, BT toggle and mute trials had no reported
+  tap overflow. A private precursor passed a ten-minute soak.
+  This does not prove drift-free operation, audible quality or latency; full UI
+  load remains untested. Do not treat it as Sendspin-ready. HA's Zigbee dongle is
+  NOT the radio console.
 - `experiments/native-audio-voice.yaml` adds standard wake/assistant clients on
   the shared native 16 kHz mic. Build with `--voice` (and optionally `--bluetooth`).
   Its test session scripts are not production source arbitration: GMF is paused

@@ -155,6 +155,10 @@ class NativeAudioConfigTests(unittest.TestCase):
             "bridge_resampler->set_output_speaker(bridge_speaker)",
             "bridge_speaker->set_parent(bridge_bus)",
             "bridge_bus->set_port(1)",
+            "media_http->set_pcm_suspension_callback",
+            "radio_gain->set_tap_suspended(suspended)",
+            "bridge_resampler->set_buffer_duration(500)",
+            "bridge_speaker->set_buffer_duration(500)",
         ):
             self.assertIn(expected, main)
         self.assertNotIn("voice_gain->set_tap_speaker", main)

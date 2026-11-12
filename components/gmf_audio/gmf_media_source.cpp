@@ -115,6 +115,10 @@ bool GmfMediaSource::request_(Operation operation, const char *uri) {
   if (operation == Operation::RUN || operation == Operation::STOP) {
     this->accept_.store(false);
     this->pcm_enabled_.store(false);
+    if (this->pcm_suspension_callback_) {
+      this->pcm_suspension_callback_(true);
+      if (operation == Operation::RUN) this->pcm_suspension_callback_(false);
+    }
     command.epoch = this->epoch_.fetch_add(1) + 1;
     this->transport_.set_epoch(command.epoch);
     this->finished_.store(false);
@@ -123,7 +127,9 @@ bool GmfMediaSource::request_(Operation operation, const char *uri) {
     this->played_frames_.store(0);
   } else if (operation == Operation::PAUSE) {
     this->pcm_enabled_.store(false);
+    if (this->pcm_suspension_callback_) this->pcm_suspension_callback_(true);
   } else if (operation == Operation::RESUME) {
+    if (this->pcm_suspension_callback_) this->pcm_suspension_callback_(false);
     this->played_frames_.store(0);
   }
   return xQueueOverwrite(this->commands_, &command) == pdPASS;
@@ -311,6 +317,7 @@ void GmfMediaSource::loop() {
     this->quarantined_.store(true);
     this->accept_.store(false);
     this->pcm_enabled_.store(false);
+    if (this->pcm_suspension_callback_) this->pcm_suspension_callback_(true);
     this->transport_.set_epoch(this->epoch_.fetch_add(1) + 1);
     ESP_LOGE(TAG, "Control timed out after 10 seconds; output quarantined");
     this->phase_("control_timeout");

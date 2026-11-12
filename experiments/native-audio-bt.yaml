@@ -1,4 +1,4 @@
-# Isolated I2S1 probe: short routing trial passed; full-load/soak validation remains.
+# Isolated I2S1 probe; lifecycle and audible validation remain necessary.
 packages:
   base: !include native-audio.yaml
 
@@ -7,6 +7,9 @@ esphome:
     priority: -100
     then:
       - lambda: |-
+          id(media_http).set_pcm_suspension_callback([](bool suspended) {
+            id(radio_gain).set_tap_suspended(suspended);
+          });
           id(bridge_speaker).add_audio_output_callback([](uint32_t frames, int64_t timestamp) {
             static uint32_t total = 0;
             static int64_t previous = 0;
@@ -36,11 +39,12 @@ speaker:
     sample_rate: 44100
     bits_per_sample: 16bit
     channel: stereo
-    buffer_duration: 100ms
+    buffer_duration: 500ms
   - platform: resampler
     id: bridge_resampler
     output_speaker: bridge_speaker
     sample_rate: 44100
+    buffer_duration: 500ms
   - id: !extend radio_gain
     tap_speaker: bridge_resampler
 

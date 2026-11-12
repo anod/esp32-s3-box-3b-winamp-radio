@@ -12,6 +12,7 @@
 #include <freertos/queue.h>
 #include <freertos/task.h>
 #include <atomic>
+#include <functional>
 #include <mutex>
 
 namespace esphome::gmf_audio {
@@ -27,6 +28,9 @@ class GmfMediaSource final : public Component, public media_source::MediaSource 
   void notify_audio_played(uint32_t frames, int64_t timestamp) override;
   void set_title_sensor(text_sensor::TextSensor *sensor) { this->title_sensor_ = sensor; }
   void set_phase_sensor(text_sensor::TextSensor *sensor) { this->phase_sensor_ = sensor; }
+  void set_pcm_suspension_callback(std::function<void(bool)> callback) {
+    this->pcm_suspension_callback_ = std::move(callback);
+  }
 
  protected:
   enum class Operation : uint8_t { STOP, RUN, PAUSE, RESUME };
@@ -72,6 +76,7 @@ class GmfMediaSource final : public Component, public media_source::MediaSource 
   const char *phase_name_{"idle"};
   text_sensor::TextSensor *title_sensor_{nullptr};
   text_sensor::TextSensor *phase_sensor_{nullptr};
+  std::function<void(bool)> pcm_suspension_callback_;
 };
 
 }  // namespace esphome::gmf_audio

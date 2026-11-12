@@ -262,10 +262,29 @@ tap drops; startup/toggle/announcement transitions did log drops, so this is not
 a lossless-output guarantee. Baseline loop time peaked at 75 ms. Evidence is in
 `.esphome/hardware/native-routing-usb-fixed.*`; the boot capture is
 `native-routing-usb.serial.log`. Stable firmware and settings were restored.
-The variant remains separate from the default probe. Its PCM tap is nonblocking,
-reports dropped bytes explicitly, and does not receive voice PCM.
-Bluetooth clock drift, audible output, full wake/assistant/UI load and the long
-soak remain readiness gates. A2DP latency is not Sendspin group synchronization.
+The variant remains separate from the default probe. Its post-gain PCM tap uses
+a bounded 128 KiB PSRAM queue and nonblocking downstream writes; overflow is
+reported rather than blocking the internal speaker. The I2S1 speaker and its
+resampler each use a 500 ms buffer. This increases potential Bluetooth latency;
+it does not correct independent-clock drift. The GMF source signals the tap on
+pause/stop and restart, discarding stale queued audio; natural completion drains
+the queue. Other media sources need their own lifecycle integration.
+
+On 2026-11-12 the repository queue ran for 180 seconds with wake and Bluetooth:
+no tap overflow was reported and both output cadences stayed above 99.9%.
+Three finite 44.1 kHz clips delivered all 133,632 accepted frames to I2S1; for
+three 48 kHz clips the resampled output was 7.4 frames below the ideal ratio.
+The frame-counting firmware included diagnostic instrumentation. Three voice
+reply trials showed no Bluetooth I2S frames during the measured reply windows
+and resumed Bluetooth afterwards. A separate trial switched between 48 and
+44.1 kHz, toggled Bluetooth and muted/unmuted without reported tap overflow.
+A preceding private prototype ran a ten-minute 44.1 kHz soak without overflow
+or sustained queue growth; this is not a long-term drift guarantee. Stable
+firmware and settings were restored after the trials. Evidence is in
+`.esphome/hardware/native-bt-repo-{voice,finite,finite48,isolation,formats}.*` and
+`native-bt-queue-soak.*`. Audible quality, end-to-end Bluetooth latency, longer
+soaks and display/wake/assistant load remain readiness gates. A2DP latency is
+not Sendspin group synchronization.
 
 `experiments/native-audio-voice.yaml` adds standard `micro_wake_word` (`okay_nabu`)
 and `voice_assistant` on the same native 16 kHz microphone resampler. Wake starts
